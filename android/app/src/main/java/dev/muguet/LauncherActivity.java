@@ -523,6 +523,85 @@ public final class LauncherActivity extends Activity {
         contactAuthor.setOnClickListener(v -> openUrl("https://x.com/MikeJohndlvl"));
         column.addView(contactAuthor);
         ready();
+        organizeLauncher(column, title, subtitle, warning, importButton, graphicsHeader, play, support);
+    }
+
+    // Turn the existing fully wired controls into a compact, navigable launcher.
+    // Reparenting preserves listeners, settings and the game launch flow.
+    private void organizeLauncher(LinearLayout root, android.view.View title, android.view.View subtitle,
+            android.view.View warning, android.view.View libraryStart, android.view.View settingsStart,
+            android.view.View playStart, android.view.View supportStart) {
+        java.util.ArrayList<android.view.View> original = new java.util.ArrayList<>();
+        for (int i = 0; i < root.getChildCount(); i++) original.add(root.getChildAt(i));
+        int library = original.indexOf(libraryStart);
+        int settingsIndex = original.indexOf(settingsStart);
+        int launch = original.indexOf(playStart);
+        int supportIndex = original.indexOf(supportStart);
+        if (library < 0 || settingsIndex < library || launch < settingsIndex || supportIndex < launch) return;
+
+        root.removeAllViews();
+        root.addView(title);
+        root.addView(subtitle);
+
+        TextView tagline = new TextView(this);
+        tagline.setText("Your game. Your settings. One place.");
+        tagline.setTextColor(0xFF9BACBF);
+        tagline.setTextSize(14);
+        root.addView(tagline);
+
+        LinearLayout tabs = new LinearLayout(this);
+        tabs.setOrientation(LinearLayout.HORIZONTAL);
+        root.addView(tabs);
+
+        LinearLayout[] pages = new LinearLayout[4];
+        for (int i = 0; i < pages.length; i++) {
+            pages[i] = new LinearLayout(this);
+            pages[i].setOrientation(LinearLayout.VERTICAL);
+            pages[i].setPadding(dp(12), dp(16), dp(12), dp(18));
+            pages[i].setBackground(rounded(0xFF111B2A, 0xFF263A50));
+            root.addView(pages[i]);
+        }
+
+        for (int i = 2; i < original.size(); i++) {
+            android.view.View view = original.get(i);
+            int page = i < library ? 0 : i < settingsIndex ? 1 : i < launch ? 2 : i < supportIndex ? 0 : 3;
+            if (view.getParent() instanceof android.view.ViewGroup)
+                ((android.view.ViewGroup) view.getParent()).removeView(view);
+            pages[page].addView(view);
+        }
+
+        // Play is the primary action, ahead of diagnostics and advanced options.
+        if (play instanceof Button) {
+            Button primary = (Button) play;
+            primary.setText("PLAY GRAND V");
+            primary.setBackground(rounded(0xFF007FBB, 0xFF40C9FF));
+            primary.setMinHeight(dp(60));
+        }
+
+        String[] labels = {"Play", "Library", "Settings", "Help"};
+        Button[] buttons = new Button[labels.length];
+        for (int i = 0; i < labels.length; i++) {
+            final int index = i;
+            Button tab = new Button(this);
+            tab.setAllCaps(false);
+            tab.setText(labels[i]);
+            tab.setTextSize(12);
+            tab.setSingleLine(true);
+            tab.setPadding(dp(2), dp(8), dp(2), dp(8));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(48), 1f);
+            lp.setMargins(dp(2), dp(10), dp(2), dp(16));
+            tabs.addView(tab, lp);
+            buttons[i] = tab;
+            tab.setOnClickListener(v -> {
+                for (int j = 0; j < pages.length; j++) {
+                    pages[j].setVisibility(j == index ? android.view.View.VISIBLE : android.view.View.GONE);
+                    buttons[j].setTextColor(j == index ? 0xFFFFFFFF : 0xFF9BACBF);
+                    buttons[j].setBackground(rounded(j == index ? 0xFF0876AD : 0xFF1C2A3D,
+                        j == index ? 0xFF40C9FF : 0xFF344760));
+                }
+            });
+        }
+        buttons[0].performClick();
     }
 
     // The native engine core is a separate library in the APK. A build without
