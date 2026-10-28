@@ -17,13 +17,13 @@ public final class DriverPackages {
     public static File root(Context context) { return new File(context.getFilesDir(), "drivers"); }
     public static File selection(Context context) { return new File(context.getFilesDir(), "driver.txt"); }
     public static String selected(Context context) {
-        try { return Files.readString(selection(context).toPath(), StandardCharsets.UTF_8).trim(); }
+        try { return new String(Files.readAllBytes(selection(context).toPath()), StandardCharsets.UTF_8).trim(); }
         catch (IOException ignored) { return "system"; }
     }
     public static void select(Context context, String name) throws IOException {
         if (!"system".equals(name) && !name.matches("custom:[A-Za-z0-9_-]{1,64}"))
             throw new IOException("Invalid driver selection");
-        Files.writeString(selection(context).toPath(), name, StandardCharsets.UTF_8);
+        Files.write(selection(context).toPath(), name.getBytes(StandardCharsets.UTF_8));
     }
     /** Native Vulkan proxy must be present before a custom selection can launch. */
     public static boolean nativeProxyInstalled(Context context) {
@@ -77,7 +77,7 @@ public final class DriverPackages {
             }
             File meta = new File(staging, "meta.json");
             if (meta.isFile()) {
-                JSONObject json = new JSONObject(Files.readString(meta.toPath(), StandardCharsets.UTF_8));
+                JSONObject json = new JSONObject(new String(Files.readAllBytes(meta.toPath()), StandardCharsets.UTF_8));
                 library = json.optString("libraryName", library);
             }
             if (!library.matches("[A-Za-z0-9_.-]+\\.so") || !new File(staging, library).isFile())
