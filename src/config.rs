@@ -26,7 +26,8 @@ const DEFAULT_CONFIG: &str = r#"{
   "player_name": "",
   "extra_args": [],
   "phone_lod": true,
-  "phone_graphics": false
+  "phone_graphics": false,
+  "streamer_percentage": 0.35
 }
 "#;
 
@@ -281,6 +282,20 @@ fn settings(cfg_path: &Path) -> Vec<String> {
         engine_args.push(format!("-frameLimit={}", if fps <= 0.0 { 0 } else if fps <= 30.0 { 2 } else { 1 }));
     }
 
+    // The engine reports about 4 GiB of video memory on this phone even as
+    // its actual resident GPU allocations and engine heap push Android into
+    // low-memory termination. Ask its own streamer to use a smaller fraction
+    // of that reported budget. This does NOT destroy a live renderer resource:
+    // eviction remains the engine's decision, with full asset reload support.
+    // Set streamer_percentage to 0 in config.json to disable this experiment;
+    // extra_args always take precedence over the automatic setting.
+    if cfg!(target_os = "android") {
+        if let Some(arg) = streamer_budget_arg(num("streamer_percentage"), &extra_args) {
+            eprintln!("[config] experimental engine asset-streaming budget: {arg}");
+            engine_args.push(arg);
+        }
+    }
+
     let start_mode = std::env::var("MUGUET_START").ok().and_then(|v| v.parse::<f64>().ok()).or_else(|| num("start_mode")).unwrap_or(2.0) as i64;
     let start_mode = if (1..=2).contains(&start_mode) { start_mode } else { 2 };
     if !std::env::args().any(|a| a.starts_with("-wasmstartchoice")) {
@@ -289,6 +304,16 @@ fn settings(cfg_path: &Path) -> Vec<String> {
     engine_args.extend(extra_args.iter().map(|a| String::from(*a)));
     fix_settings(num("texture_quality").map(|q| q as i64), phone_graphics, phone_lod);
     engine_args
+}
+
+// The native wasm2c runner already accepts the same engine command-line
+// flag via PG_STREAMER_PERCENTAGE; keep the JIT Android path consistent.
+// Clamp to its tested input range and allow an explicit 0 to opt out.
+fn streamer_budget_arg(requested: Option<f64>, extra_args: &[&str]) -> Option<String> {
+    if extra_args.iter().any(|arg| arg.starts_with("-percentageForStreamer")) { return None; }
+    let percent = requested.unwrap_or(0.35);
+    if !percent.is_finite() || percent <= 0.0 { return None; }
+    Some(format!("-percentageForStreamer={:.3}", percent.clamp(0.1, 0.95)))
 }
 
 fn fix_settings(texture_quality: Option<i64>, phone_graphics: bool, phone_lod: bool) {
@@ -365,6 +390,17 @@ mod tests {
     fn tag(xml: &str, name: &str) -> String {
         let re = regex::Regex::new(&format!(r#"<{name} value="[^"]*"\s*/>"#)).unwrap();
         re.captures(xml).unwrap()[0].to_string()
+    }
+
+    #[test]
+    fn android_streamer_budget_is_configurable_and_respects_explicit_args() {
+        assert_eq!(streamer_budget_arg(None, &[]), Some("-percentageForStreamer=0.350".into()));
+        assert_eq!(streamer_budget_arg(Some(0.25), &[]), Some("-percentageForStreamer=0.250".into()));
+        assert_eq!(streamer_budget_arg(Some(0.01), &[]), Some("-percentageForStreamer=0.100".into()));
+        assert_eq!(streamer_budget_arg(Some(1.2), &[]), Some("-percentageForStreamer=0.950".into()));
+        assert_eq!(streamer_budget_arg(Some(0.0), &[]), None);
+        assert_eq!(streamer_budget_arg(Some(f64::NAN), &[]), None);
+        assert_eq!(streamer_budget_arg(None, &["-percentageForStreamer=0.600"]), None);
     }
 
     #[test]
