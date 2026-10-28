@@ -486,6 +486,21 @@ public final class LauncherActivity extends Activity {
 
     // Persist the chosen settings, then start the requested game activity.
     private void launch(Class<?> activity) {
+        // A saved custom selection is not evidence that the Vulkan proxy is active.
+        // Refuse to silently benchmark the stock driver as though it were Turnip.
+        if (DriverPackages.selected(this).startsWith("custom:")) {
+            new AlertDialog.Builder(this)
+                .setTitle("Custom Vulkan driver unavailable")
+                .setMessage("The custom driver was imported, but the native Vulkan proxy is not integrated into this build. Launch with the stock Samsung driver instead?")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Use system driver", (dialog, which) -> {
+                    try {
+                        DriverPackages.select(this, "system");
+                        launch(activity);
+                    } catch (IOException error) { status.setText("Cannot select system driver: " + error.getMessage()); }
+                }).show();
+            return;
+        }
         try {
             double renderScale = Double.parseDouble(scale.getText().toString());
             if (!Double.isFinite(renderScale) || renderScale < 0.25 || renderScale > 1) throw new IllegalArgumentException("Render scale must be between 0.25 and 1.0");
