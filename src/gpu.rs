@@ -1066,6 +1066,8 @@ pub struct Gpu {
     // Reverse dependency index: only cached bind groups actually referring to
     // the destroyed object need invalidation.
     bg_dependents: HashMap<u32, HashSet<Vec<u64>>>,
+    // Reverse index of guest SRV/UAV view IDs by parent texture/buffer.
+    view_dependents: HashMap<u32, HashSet<u32>>,
     ubo_slots: Vec<Vec<Chunk>>,
     ubo_shared: Vec<(Buffer, u64)>,
     ubo_slot: usize,
@@ -1280,7 +1282,8 @@ impl Gpu {
             s: State::new(), pdirty: true, last_pl: None, shader_index, shader_dir, next_uid: 1,
             bgl_cache: HashMap::new(), empty_bgl: None, pipelines: HashMap::new(),
             pipeline_fifo: VecDeque::new(), pipeline_evictions: 0,
-            compute: HashMap::new(), bind_groups: FifoCache::new(BG_LIMIT), bg_dependents: HashMap::new(),
+            compute: HashMap::new(), bind_groups: FifoCache::new(BG_LIMIT),
+            bg_dependents: HashMap::new(), view_dependents: HashMap::new(),
             ubo_slots: (0..FRAME_SLOTS).map(|_| Vec::new()).collect(), ubo_shared: Vec::new(), ubo_slot: 0, ubo_chunk: 0, ubo_off: 0,
             dummy_tex: HashMap::new(), dummy_smp: None, dummy_cmp: None, dummy_bufs: HashMap::new(), zero_vb: None, zero_src: None, scratch: None,
             proxy_pipelines: HashMap::new(), f2d_pipeline: None, blit: None, mip_pipelines: HashMap::new(), mip_sampler: None,
@@ -1709,7 +1712,13 @@ impl Gpu {
                     if let Some(g) = b.gpu { g.destroy(); }
                     if let Some(counter) = b.counter { counter.destroy(); }
                 }
-                Obj::Srv(_) | Obj::Uav(_) => self.resource_destroys[2] += 1,
+                Obj::Srv(v) | Obj::Uav(v) => {
+                    self.resource_destroys[2] += 1;
+                    if let std::collections::hash_map::Entry::Occupied(mut entry) = self.view_dependents.entry(v.res) {
+                        entry.get_mut().remove(&id);
+                        if entry.get().is_empty() { entry.remove(); }
+                    }
+                },
                 Obj::Shader(shader) => {
                     if let Some(Some(prog)) = shader.program {
                         self.invalidate_shader_caches(prog.uid);
@@ -1720,12 +1729,11 @@ impl Gpu {
         }
     }
     fn invalidate_views_of_resource(&mut self, resource: u32) {
-        // The guest still owns its view IDs, so do not free those IDs.
-        // Only discard native handles tied to the released parent resource.
-        for obj in &mut self.objs {
-            match obj {
-                Some(Obj::Srv(view)) | Some(Obj::Uav(view)) if view.res == resource => view.views.clear(),
-                _ => {}
+        // Keep guest view IDs but discard cached native handles; only touch
+        // dependents of the released texture/buffer, not all engine objects.
+        if let Some(ids) = self.view_dependents.get(&resource).cloned() {
+            for id in ids {
+                if let Some(view) = self.view_obj_mut(id) { view.views.clear(); }
             }
         }
     }
@@ -1817,10 +1825,11 @@ impl Gpu {
             label: None, size, mip_level_count: mips.max(1), sample_count: samples, dimension, format: m.format, usage, view_formats: &views,
         };
         let tex = match self.scoped(&format!("createTexture id={id} dim={dim} {}x{}x{} mips={mips} dxgi={dxgi} bind=0x{bind:x} samples={samples} -> {:?} usage {:?}", size.width, size.height, size.depth_or_array_layers, m.format, usage), |d| d.create_texture(&desc)) { Some(t) => t, None => return };
+        let born_frame = self.presents;
         self.set_obj(id, Obj::Tex(Tex {
             tex, desc: TexDesc { w: size.width, h: size.height, d: size.depth_or_array_layers, mips: mips.max(1), samples, dim: dimension },
             format: m.format, compressed_source, views: HashMap::new(), a8: m.a8, enc: 0, in_bg: false,
-            born_frame: self.presents, last_used_frame: None,
+            born_frame, last_used_frame: None,
             proxy_depth: None, proxy_stencil: None, proxy_fdepth: None, blit_bg: None, mip_passes: None,
         }));
     }
@@ -1988,8 +1997,11 @@ impl Gpu {
             res: self.u(p + 2), is_buf: self.u(p + 1) == 1, fmt: self.u(p + 3), vdim: self.u(p + 4),
             a: self.u(p + 5), b: self.u(p + 6), c: self.u(p + 7), d: self.u(p + 8), views: HashMap::new(),
         };
-        let id = self.u(p);
+        let (id, parent) = (self.u(p), v.res);
         self.set_obj(id, if uav { Obj::Uav(v) } else { Obj::Srv(v) });
+        if parent != 0 && self.view_obj(id).is_some() {
+            self.view_dependents.entry(parent).or_default().insert(id);
+        }
     }
 
     fn shader_program(&mut self, id: u32) -> Option<Rc<Program>> {
