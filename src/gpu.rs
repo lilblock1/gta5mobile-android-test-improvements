@@ -882,13 +882,21 @@ enum PipeEntry { Pending, Done(Option<Rc<Pl>>) }
 // A validation-only scope misses driver/compiler errors and allocation failures.
 // Device loss is reported separately by wgpu, so also check the callback's flag
 // before accepting a newly created resource.
+// Measure scope completion: three asynchronous error-scope pops can stall
+// during resource creation and pipeline compilation on some drivers.
+static GPU_SCOPE_CALLS: AtomicU64 = AtomicU64::new(0);
+static GPU_SCOPE_NS: AtomicU64 = AtomicU64::new(0);
 fn gpu_scoped<T>(device: &Device, lost: &AtomicBool, what: &str, f: impl FnOnce(&Device) -> T) -> Option<T> {
     if lost.load(Ordering::SeqCst) { return None; }
+    let started = Instant::now();
     let oom = device.push_error_scope(ErrorFilter::OutOfMemory);
     let internal = device.push_error_scope(ErrorFilter::Internal);
     let validation = device.push_error_scope(ErrorFilter::Validation);
     let v = f(device);
     let errors = [pollster::block_on(validation.pop()), pollster::block_on(internal.pop()), pollster::block_on(oom.pop())];
+    let elapsed = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+    GPU_SCOPE_CALLS.fetch_add(1, Ordering::Relaxed);
+    GPU_SCOPE_NS.fetch_add(elapsed, Ordering::Relaxed);
     let mut failed = lost.load(Ordering::SeqCst);
     if failed && errors.iter().all(Option::is_none) {
         log_once(&format!("lost:{what}"), &format!("{what} failed: device lost during resource creation (see device-loss message)"));
@@ -3640,6 +3648,14 @@ impl Gpu {
                 if self.frame_waits == 0 { 0.0 } else { self.frame_wait_ns as f64 / self.frame_waits as f64 / 1e6 },
                 self.frame_wait_max_ns as f64 / 1e6,
                 self.pipelines.len(), self.pipe_pending.len(),
+            ));
+            let scope_calls = GPU_SCOPE_CALLS.swap(0, Ordering::Relaxed);
+            let scope_ns = GPU_SCOPE_NS.swap(0, Ordering::Relaxed);
+            log(&format!(
+                "gpu scope waits: {} resource/pipeline creations, {:.3} ms average, {:.3} ms total",
+                scope_calls,
+                if scope_calls == 0 { 0.0 } else { scope_ns as f64 / scope_calls as f64 / 1e6 },
+                scope_ns as f64 / 1e6,
             ));
             self.frame_waits = 0;
             self.frame_wait_ns = 0;
