@@ -4,10 +4,13 @@ This adds an **ARM64 native Android application**, not an iOS emulator or a
 WebView. It uses Wasmtime for `game.wasm`, wgpu/Vulkan for graphics, CPAL/AAudio
 for audio, Android views for touch controls, and the existing UDP multiplayer.
 No proprietary game files are included in the APK.
-The Android app is displayed as **GTA 5** (powered by Muguet). Its package ID
-remains `dev.muguet`, retaining its storage layout. Installing an update requires
-the same signing key; fresh CI debug keys may require uninstalling the older app
-(which deletes its private game files and saves). This is not an official Rockstar app.
+This fork installs as **Grand V Android Test** under application ID
+`dev.muguet.test`. It can be installed alongside the original `dev.muguet` app
+without replacing it. Each app has separate private game files, saves and config;
+the test app must import or select compatible game files separately. Updates to
+the test app require the same signing key; fresh CI debug keys may require
+uninstalling only the existing test app (which deletes its private game files
+and saves). This is not an official Rockstar app.
 
 **Not yet verified in-game.** Building and testing with an actual device and
 compatible game files is required before calling this a working port.
