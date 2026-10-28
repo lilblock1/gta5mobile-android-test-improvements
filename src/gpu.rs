@@ -910,6 +910,41 @@ enum PipeEntry { Pending, Done(Option<Rc<Pl>>) }
 // during resource creation and pipeline compilation on some drivers.
 static GPU_SCOPE_CALLS: AtomicU64 = AtomicU64::new(0);
 static GPU_SCOPE_NS: AtomicU64 = AtomicU64::new(0);
+
+// Pop all three nested error scopes in LIFO order, then poll their futures
+// together. Awaiting each pop separately can impose three sequential driver
+// synchronization round trips for every texture, shader, or pipeline creation.
+// No error category is dropped: validation, internal, and OOM all complete
+// before the created resource is accepted.
+fn await_three<A, B, C>(a: A, b: B, c: C) -> (A::Output, B::Output, C::Output)
+where
+    A: std::future::Future,
+    B: std::future::Future,
+    C: std::future::Future,
+{
+    let mut a = std::pin::pin!(a);
+    let mut b = std::pin::pin!(b);
+    let mut c = std::pin::pin!(c);
+    let mut ra = None;
+    let mut rb = None;
+    let mut rc = None;
+    pollster::block_on(std::future::poll_fn(|cx| {
+        if ra.is_none() {
+            if let std::task::Poll::Ready(v) = a.as_mut().poll(cx) { ra = Some(v); }
+        }
+        if rb.is_none() {
+            if let std::task::Poll::Ready(v) = b.as_mut().poll(cx) { rb = Some(v); }
+        }
+        if rc.is_none() {
+            if let std::task::Poll::Ready(v) = c.as_mut().poll(cx) { rc = Some(v); }
+        }
+        if ra.is_some() && rb.is_some() && rc.is_some() {
+            std::task::Poll::Ready((ra.take().unwrap(), rb.take().unwrap(), rc.take().unwrap()))
+        } else {
+            std::task::Poll::Pending
+        }
+    }))
+}
 fn gpu_scoped<T>(device: &Device, lost: &AtomicBool, what: &str, f: impl FnOnce(&Device) -> T) -> Option<T> {
     if lost.load(Ordering::SeqCst) { return None; }
     let started = Instant::now();
@@ -917,7 +952,14 @@ fn gpu_scoped<T>(device: &Device, lost: &AtomicBool, what: &str, f: impl FnOnce(
     let internal = device.push_error_scope(ErrorFilter::Internal);
     let validation = device.push_error_scope(ErrorFilter::Validation);
     let v = f(device);
-    let errors = [pollster::block_on(validation.pop()), pollster::block_on(internal.pop()), pollster::block_on(oom.pop())];
+    // Pop in reverse nesting order before waiting, to let all completions
+    // advance concurrently rather than blocking three times in sequence.
+    let popped_validation = validation.pop();
+    let popped_internal = internal.pop();
+    let popped_oom = oom.pop();
+    let (validation_error, internal_error, oom_error) =
+        await_three(popped_validation, popped_internal, popped_oom);
+    let errors = [validation_error, internal_error, oom_error];
     let elapsed = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
     GPU_SCOPE_CALLS.fetch_add(1, Ordering::Relaxed);
     GPU_SCOPE_NS.fetch_add(elapsed, Ordering::Relaxed);
@@ -1780,8 +1822,13 @@ impl Gpu {
     #[allow(clippy::too_many_arguments)]
     fn upload_texture(&mut self, id: u32, mip: u32, slice: u32, x: u32, y: u32, z: u32, w: u32, h: u32, d: u32, bpr: u32, rows: u32, size: u64, data_addr: u64) {
         if self.tex(id).is_none() { return; }
-        if self.pending_clears.contains_key(&id) { self.materialize_clears(id); self.flush(); }
-        if self.used(id) { self.flush(); }
+        // Materialize pending clears before uploading. Both the clears and
+        // a previous use need the same submission boundary: issue it once,
+        // not twice, to avoid unnecessary render-pass and encoder churn.
+        let pending_clear = self.pending_clears.contains_key(&id);
+        let was_used = self.used(id);
+        if pending_clear { self.materialize_clears(id); }
+        if pending_clear || was_used { self.flush(); }
         let t = self.tex_mut(id).unwrap();
         if let Some(p) = t.proxy_fdepth.as_mut() { p.dirty = true; }
         let three = t.desc.dim == TextureDimension::D3;
@@ -3722,7 +3769,10 @@ impl Gpu {
         }
         self.log_fps();
 
-        self.frame_slot_done[self.ubo_slot] = self.last_submit.clone();
+        // Record a fence only when this frame actually submitted GPU work.
+        // Reusing the previous submission index on empty frames caused
+        // redundant Wait polls even when no uniform data could be in flight.
+        self.frame_slot_done[self.ubo_slot] = self.last_submit.take();
         self.ubo_slot = (self.ubo_slot + 1) % FRAME_SLOTS;
         self.ubo_chunk = 0;
         self.ubo_off = 0;
