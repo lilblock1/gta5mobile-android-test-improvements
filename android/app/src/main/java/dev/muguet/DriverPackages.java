@@ -82,6 +82,17 @@ public final class DriverPackages {
             }
             if (!library.matches("[A-Za-z0-9_.-]+\\.so") || !new File(staging, library).isFile())
                 throw new IOException("Driver library missing: " + library);
+            // ELF64 little-endian AArch64 shared object; reject wrong-ABI drivers.
+            try (RandomAccessFile elf = new RandomAccessFile(new File(staging, library), "r")) {
+                if (elf.length() < 64 || elf.readUnsignedByte() != 0x7f
+                    || elf.readUnsignedByte() != 'E' || elf.readUnsignedByte() != 'L'
+                    || elf.readUnsignedByte() != 'F' || elf.readUnsignedByte() != 2
+                    || elf.readUnsignedByte() != 1)
+                    throw new IOException("Driver is not an ARM64 ELF shared library");
+                elf.seek(18);
+                if (elf.readUnsignedByte() != 183 || elf.readUnsignedByte() != 0)
+                    throw new IOException("Driver is not AArch64");
+            }
             String name = "imported_" + Long.toHexString(System.currentTimeMillis());
             File target = new File(root, name);
             if (!staging.renameTo(target)) throw new IOException("Cannot finalize driver");
