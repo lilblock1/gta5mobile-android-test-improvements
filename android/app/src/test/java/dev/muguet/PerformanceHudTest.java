@@ -8,8 +8,10 @@ import org.junit.Test;
 public class PerformanceHudTest {
     @Test public void formatsCompactRealtimeStats() {
         long[] stats = {600, 1341L * 1048576L, 110669, 34604, 3, 450};
-        String text = PerformanceHud.format(59.7f, stats, 15, 1.0);
-        assertTrue(text.contains("60 FPS"));
+        String text = PerformanceHud.format(59.7f, stats, 15, 1.0, "Moderate");
+        assertTrue(text.contains("60 FPS  |  Thermal Moderate"));
+        assertTrue(text.contains("\nB "));
+        assertEquals(2, text.split("\\n", -1).length);
         assertTrue(text.contains("16.8 ms"));
         assertTrue(text.contains("GPU buf 1341 MB"));
         assertTrue(text.contains("B 111k"));
@@ -28,8 +30,14 @@ public class PerformanceHudTest {
     }
 
     @Test public void rejectsMissingMetricsGracefully() {
-        assertEquals("25 FPS", PerformanceHud.format(24.8f, null, 0, 1));
-        assertEquals("25 FPS", PerformanceHud.format(24.8f, new long[]{1}, 0, 1));
+        assertEquals("25 FPS  |  Thermal Unknown", PerformanceHud.format(24.8f, null, 0, 1));
+        assertEquals("25 FPS  |  Thermal Unknown", PerformanceHud.format(24.8f, new long[]{1}, 0, 1));
+        assertEquals("25 FPS  |  Thermal Unknown", PerformanceHud.format(24.8f, null, 0, 1, null));
+    }
+
+    @Test public void showsThermalPressureEvenWhenNoGpuStatsAvailable() {
+        assertEquals("42 FPS  |  Thermal Severe",
+            PerformanceHud.format(42, null, 0, 1, "Severe"));
     }
 
     @Test public void neverDisplaysNegativeSkippedDraws() {
