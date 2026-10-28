@@ -144,6 +144,33 @@ pub static OCCLUDED: AtomicBool = AtomicBool::new(false);
 pub static SUSPENDED: AtomicBool = AtomicBool::new(false);
 
 pub static PRESENTS: AtomicU64 = AtomicU64::new(0);
+// UI telemetry is written once per second by the GPU thread. HUD readers only
+// load atomics: no GPU queries, allocation, mutex, or object scans per frame.
+// Counts are engine-owned IDs; buffer bytes exclude textures and driver usage.
+static HUD_BUFFER_BYTES: AtomicU64 = AtomicU64::new(0);
+static HUD_LIVE_BUFFERS: AtomicU64 = AtomicU64::new(0);
+static HUD_LIVE_TEXTURES: AtomicU64 = AtomicU64::new(0);
+static HUD_COMPILING: AtomicU64 = AtomicU64::new(0);
+static HUD_SKIPPED_DRAWS: AtomicU64 = AtomicU64::new(0);
+
+pub fn perf_snapshot() -> [u64; 6] {
+    [
+        PRESENTS.load(Ordering::Relaxed),
+        HUD_BUFFER_BYTES.load(Ordering::Relaxed),
+        HUD_LIVE_BUFFERS.load(Ordering::Relaxed),
+        HUD_LIVE_TEXTURES.load(Ordering::Relaxed),
+        HUD_COMPILING.load(Ordering::Relaxed),
+        HUD_SKIPPED_DRAWS.load(Ordering::Relaxed),
+    ]
+}
+
+// The native wasm2c activity uses the same snapshot through dlsym.
+#[no_mangle]
+pub extern "C" fn muguet_gpu_perf_snapshot(output: *mut u64, length: usize) {
+    if output.is_null() || length < 6 { return; }
+    let values = perf_snapshot();
+    unsafe { std::ptr::copy_nonoverlapping(values.as_ptr(), output, values.len()); }
+}
 
 pub fn backends() -> Backends {
     if cfg!(target_vendor = "apple") { Backends::METAL } else { Backends::VULKAN }
@@ -1039,6 +1066,8 @@ pub struct Gpu {
     resource_creates: [u64; 3],
     resource_destroys: [u64; 3],
     resource_replacements: u64,
+    live_gpu_buffer_bytes: u64,
+    hud_last_sample: Instant,
     enc: Option<CommandEncoder>,
     enc_epoch: u64,
     pass: Option<RenderPass<'static>>,
@@ -1277,7 +1306,8 @@ impl Gpu {
         Ok(Gpu {
             instance: instance.clone(), pending_clears: HashMap::new(), clears_folded: 0, pipe_jobs, pipe_results, pipe_pending: HashMap::new(), pending_skips: 0, pending_skips0: 0,
             base, mem, ring, device, queue, adapter, surface, surface_format, surface_size: (0, 0),
-            objs: Vec::new(), resource_creates: [0; 3], resource_destroys: [0; 3], resource_replacements: 0,
+            objs: Vec::new(), resource_creates: [0; 3], resource_destroys: [0; 3],
+            resource_replacements: 0, live_gpu_buffer_bytes: 0, hud_last_sample: Instant::now(),
             enc: None, enc_epoch: 1, pass: None, pass_key: None, pass_info: None, pass_st: PassSt::default(),
             s: State::new(), pdirty: true, last_pl: None, shader_index, shader_dir, next_uid: 1,
             bgl_cache: HashMap::new(), empty_bgl: None, pipelines: HashMap::new(),
@@ -1337,7 +1367,10 @@ impl Gpu {
             self.destroy(id);
         }
         match &o {
-            Obj::Buf(_) => self.resource_creates[0] += 1,
+            Obj::Buf(b) => {
+                self.resource_creates[0] += 1;
+                self.live_gpu_buffer_bytes = self.live_gpu_buffer_bytes.saturating_add(b.bytes);
+            },
             Obj::Tex(_) => self.resource_creates[1] += 1,
             Obj::Srv(_) | Obj::Uav(_) => self.resource_creates[2] += 1,
             _ => {}
@@ -1708,6 +1741,7 @@ impl Gpu {
                 }
                 Obj::Buf(b) => {
                     self.resource_destroys[0] += 1;
+                    self.live_gpu_buffer_bytes = self.live_gpu_buffer_bytes.saturating_sub(b.bytes);
                     self.invalidate_views_of_resource(id);
                     if let Some(g) = b.gpu { g.destroy(); }
                     if let Some(counter) = b.counter { counter.destroy(); }
@@ -3815,6 +3849,17 @@ impl Gpu {
         self.collect_pipelines();
         self.presents += 1;
         PRESENTS.store(self.presents, Ordering::Relaxed);
+        // Update HUD telemetry at most once per second. All values are already
+        // maintained incrementally by create/destroy and pipeline bookkeeping.
+        // Full wgpu diagnostics remain on the existing 10-second log cadence.
+        if self.hud_last_sample.elapsed() >= Duration::from_secs(1) {
+            HUD_BUFFER_BYTES.store(self.live_gpu_buffer_bytes, Ordering::Relaxed);
+            HUD_LIVE_BUFFERS.store(self.resource_creates[0].saturating_sub(self.resource_destroys[0]), Ordering::Relaxed);
+            HUD_LIVE_TEXTURES.store(self.resource_creates[1].saturating_sub(self.resource_destroys[1]), Ordering::Relaxed);
+            HUD_COMPILING.store(self.pipe_pending.len() as u64, Ordering::Relaxed);
+            HUD_SKIPPED_DRAWS.store(self.pending_skips, Ordering::Relaxed);
+            self.hud_last_sample = Instant::now();
+        }
         // Live frame rate for the engine shell's counter (the engine path has
         // no other way to ask the renderer how fast it is going).
         let n = FPS_FRAMES.fetch_add(1, Ordering::Relaxed) + 1;
