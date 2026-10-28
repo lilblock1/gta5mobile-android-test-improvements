@@ -2904,7 +2904,7 @@ impl Gpu {
         let (topo, strip) = topology(self.s.topo);
         let strip_fmt = if strip && self.s.ib.0 != 0 { Some(if self.s.ib.1 == 57 { IndexFormat::Uint16 } else { IndexFormat::Uint32 }) } else { None };
         let mut key: Vec<i64> = vec![vs.uid as i64, ps.map(|p| p.uid as i64).unwrap_or(0), self.s.layout as i64];
-        let strides: Vec<u32> = (0..16).map(|i| { let v = &self.s.vb[i]; if v.buf != 0 && self.buf(v.buf).map(|b| b.gpu.is_some()).unwrap_or(false) { v.stride } else { 0 } }).collect();
+        let strides: Vec<u32> = (0..16).map(|i| { let v = &self.s.vb[i]; if v.buf != 0 && self.buf(v.buf).map(|b| b.bytes > 0).unwrap_or(false) { v.stride } else { 0 } }).collect();
         for &(slot, _) in &layout.slots { key.push(strides[slot as usize] as i64); }
         key.extend([self.s.topo as i64, match strip_fmt { Some(IndexFormat::Uint16) => 1, Some(_) => 2, None => 0 }, self.s.blend.0 as i64, self.s.dss.0 as i64, self.s.rs as i64]);
         for f in &pi.rt_formats { key.push(f.map(|f| format_id(f)).unwrap_or(-1)); }
@@ -3088,7 +3088,8 @@ impl Gpu {
         let mut vb_binds: Vec<(u32, Buffer, u64, u64)> = Vec::new();
         for &(slot, cls) in &layout.slots {
             let vb = self.s.vb[slot as usize].clone();
-            match self.buf(vb.buf).and_then(|b| b.gpu.clone().map(|g| (g, b.bytes))) {
+            let backed = self.gpu_buffer(vb.buf);
+            match backed.and_then(|g| self.buf(vb.buf).map(|b| (g, b.bytes))) {
                 None => {
                     let dev = self.device.clone();
                     let z = self.zero_vb.get_or_insert_with(|| dev.create_buffer(&BufferDescriptor { label: Some("zero vb"), size: ZERO_VB_SIZE, usage: BufferUsages::VERTEX, mapped_at_creation: false })).clone();
@@ -3108,7 +3109,8 @@ impl Gpu {
         let mut ib_bind = None;
         if indexed && kind < 4 {
             let (ibid, ifmt, ioff) = self.s.ib;
-            let Some((g, bytes)) = self.buf(ibid).and_then(|b| b.gpu.clone().map(|g| (g, b.bytes))) else { self.skip(); return };
+            let backed = self.gpu_buffer(ibid);
+            let Some((g, bytes)) = backed.and_then(|g| self.buf(ibid).map(|b| (g, b.bytes))) else { self.skip(); return };
             let fmt = if ifmt == 57 { IndexFormat::Uint16 } else { IndexFormat::Uint32 };
             let isz = if fmt == IndexFormat::Uint16 { 2 } else { 4 };
             ib_max = (bytes.saturating_sub(ioff as u64) / isz).saturating_sub(start as u64);
@@ -3116,7 +3118,7 @@ impl Gpu {
             self.use_buf(ibid);
         } else if kind == 4 {
             let (ibid, ifmt, ioff) = self.s.ib;
-            if let Some(g) = self.buf(ibid).and_then(|b| b.gpu.clone()) {
+            if let Some(g) = self.gpu_buffer(ibid) {
                 ib_bind = Some((g, if ifmt == 57 { IndexFormat::Uint16 } else { IndexFormat::Uint32 }, ioff as u64, ibid));
                 self.use_buf(ibid);
             }
@@ -3151,7 +3153,7 @@ impl Gpu {
             }
         }
         let args = if kind >= 4 {
-            match self.buf(u(1)).and_then(|b| b.gpu.clone()) { Some(g) => { self.use_buf(u(1)); Some((g, u(2) as u64)) } None => { self.skip(); return } }
+            match self.gpu_buffer(u(1)) { Some(g) => { self.use_buf(u(1)); Some((g, u(2) as u64)) } None => { self.skip(); return } }
         } else { None };
 
         let st = &mut self.pass_st;
@@ -3397,9 +3399,9 @@ impl Gpu {
         self.materialize_clears(dst);
         if self.obj(src).is_none() || self.obj(dst).is_none() { return; }
         self.end_pass();
-        if let (Some(sb), Some(db)) = (self.buf(src), self.buf(dst)) {
-            let (Some(sg), Some(dg)) = (sb.gpu.clone(), db.gpu.clone()) else { return };
-            let size = if has_box { (r - l) as u64 } else { sb.size.min(db.size) };
+        if let (Some(src_size), Some(dst_size)) = (self.buf(src).map(|b| b.size), self.buf(dst).map(|b| b.size)) {
+            let (Some(sg), Some(dg)) = (self.gpu_buffer(src), self.gpu_buffer(dst)) else { return };
+            let size = if has_box { (r - l) as u64 } else { src_size.min(dst_size) };
             let size = size & !3;
             if size > 0 { self.encoder().copy_buffer_to_buffer(&sg, if has_box { l as u64 } else { 0 }, &dg, dx as u64, size); }
             self.use_buf(src);
@@ -3552,7 +3554,8 @@ impl Gpu {
         self.materialize_clears(src);
         if self.obj(src).is_none() { done(self); return; }
         if is_buf {
-            let Some((g, bsize)) = self.buf(src).and_then(|bo| bo.gpu.clone().map(|g| (g, bo.size))) else { done(self); return };
+            let backed = self.gpu_buffer(src);
+            let Some((g, bsize)) = backed.and_then(|g| self.buf(src).map(|bo| (g, bo.size))) else { done(self); return };
             let n = if has_box { (r - l) as u64 } else { size.min(bsize) };
             let padded = ((n + 3) & !3).max(4);
             let rb = self.device.create_buffer(&BufferDescriptor { label: Some("readback"), size: padded, usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ, mapped_at_creation: false });
@@ -3784,7 +3787,7 @@ impl Gpu {
     }
     fn copy_counter(&mut self, dst: u32, offset: u64, uav: u32) {
         let Some(res) = self.view_obj(uav).filter(|v| v.is_buf).map(|v| v.res) else { return };
-        let Some(dg) = self.buf(dst).and_then(|b| b.gpu.clone()) else { return };
+        let Some(dg) = self.gpu_buffer(dst) else { return };
         let Some(cb) = self.counter_buffer(res) else { return };
         self.end_pass();
         self.encoder().copy_buffer_to_buffer(&cb, 0, &dg, offset, 4);
