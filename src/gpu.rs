@@ -2450,7 +2450,8 @@ impl Gpu {
     fn stage_bind_group(&mut self, stage: usize, prog: &Program, group: u32, bgl: &(BindGroupLayout, u64)) -> Option<BgResult> {
         enum Res { Buf(Buffer, u64, Option<u64>), View(TextureView), Smp(Sampler) }
         // Avoid cloning immutable shader binding descriptions on every draw.
-        let Some(bindings) = prog.group_bindings.get(&group) else { return None };
+        // An absent group can still be a valid empty compute bind group.
+        let bindings = prog.group_bindings.get(&group).map(Vec::as_slice).unwrap_or(&[]);
         let mut entries: Vec<(u32, Res)> = Vec::with_capacity(bindings.len());
         let mut key: Vec<u64> = vec![bgl.1, prog.uid, stage as u64];
         let mut dyn_off = None;
