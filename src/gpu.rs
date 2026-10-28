@@ -1104,6 +1104,9 @@ pub struct Gpu {
     frame_waits: u64,
     frame_wait_ns: u64,
     frame_wait_max_ns: u64,
+    explicit_fence_waits: u64,
+    explicit_fence_ns: u64,
+    explicit_fence_max_ns: u64,
     errors: Arc<AtomicU64>,
     lost: Arc<AtomicBool>,
 
@@ -1283,6 +1286,7 @@ impl Gpu {
             dbg_idx: if dbg != 0 { dbg + 424 } else { 0 },
             draws: 0, skipped: 0, presents: 0, pipe_creates: 0, fps_t0: Instant::now(), fps_n0: 0, fps_d0: 0,
             frame_waits: 0, frame_wait_ns: 0, frame_wait_max_ns: 0,
+            explicit_fence_waits: 0, explicit_fence_ns: 0, explicit_fence_max_ns: 0,
             errors, lost, inflight: Arc::new(AtomicU64::new(0)), submits: 0, submits0: 0, passes: 0, passes0: 0,
         })
     }
@@ -1547,8 +1551,18 @@ impl Gpu {
             6 => self.clear_ds(u(0), u(1), u(2), u(3), self.f(p + 4), u(5)),
             7 => self.present(u(0)),
             8 => {
+                // This is the guest's explicit GPU completion fence. Removing
+                // the wait would break readback and synchronization semantics;
+                // record its cost separately from frame-slot and scope stalls.
                 self.flush();
-                if !self.lost.load(Ordering::SeqCst) { let _ = self.device.poll(PollType::Wait { submission_index: None, timeout: None }); }
+                if !self.lost.load(Ordering::SeqCst) {
+                    let started = Instant::now();
+                    let _ = self.device.poll(PollType::Wait { submission_index: None, timeout: None });
+                    let ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+                    self.explicit_fence_waits += 1;
+                    self.explicit_fence_ns = self.explicit_fence_ns.saturating_add(ns);
+                    self.explicit_fence_max_ns = self.explicit_fence_max_ns.max(ns);
+                }
                 let addr = u(0) as u64 + u(1) as u64 * 4294967296;
                 self.mem.word(addr).store(u(2) as i32, Ordering::SeqCst);
                 let _ = self.mem.notify(addr);
@@ -3846,6 +3860,16 @@ impl Gpu {
                 self.frame_wait_max_ns as f64 / 1e6,
                 self.pipelines.len(), PIPELINE_LIMIT, self.pipe_pending.len(), self.pipeline_evictions,
             ));
+            log(&format!(
+                "gpu fences: {} explicit waits, {:.3} ms average, {:.3} ms max, {:.3} ms total",
+                self.explicit_fence_waits,
+                if self.explicit_fence_waits == 0 { 0.0 } else { self.explicit_fence_ns as f64 / self.explicit_fence_waits as f64 / 1e6 },
+                self.explicit_fence_max_ns as f64 / 1e6,
+                self.explicit_fence_ns as f64 / 1e6,
+            ));
+            self.explicit_fence_waits = 0;
+            self.explicit_fence_ns = 0;
+            self.explicit_fence_max_ns = 0;
             let scope_calls = GPU_SCOPE_CALLS.swap(0, Ordering::Relaxed);
             let scope_ns = GPU_SCOPE_NS.swap(0, Ordering::Relaxed);
             log(&format!(
@@ -3938,6 +3962,23 @@ fn driver_needs_software_clip(name: &str, driver: &str, driver_info: &str) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn combined_scope_wait_polls_all_futures_before_finishing() {
+        use std::task::Poll;
+        // Each future yields once. Waiting on all three at once must complete
+        // without dropping any result or polling a completed future again.
+        let make = |value| {
+            let mut first = true;
+            std::future::poll_fn(move |cx| {
+                if std::mem::take(&mut first) {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                } else { Poll::Ready(value) }
+            })
+        };
+        assert_eq!(await_three(make(1), make(2), make(3)), (1, 2, 3));
+    }
 
     fn shadow_buffer(size: u64) -> Buf {
         Buf { size, stride: 0, gpu: None, bytes: 0, shadow: Some(Vec::new()), version: 0, enc: 0, in_bg: false, counter: None }
