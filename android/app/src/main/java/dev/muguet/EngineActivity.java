@@ -62,6 +62,7 @@ public final class EngineActivity extends Activity {
     private SurfaceView surface;
     private TouchControls controls;
     private TextView status, fpsText;
+    private ThermalStatus thermalStatus;
     private InputManagerCompat devices;
     private AudioTrack audio;
     private Thread audioThread;
@@ -77,6 +78,7 @@ public final class EngineActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        thermalStatus = new ThermalStatus(this);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         getWindow().getDecorView().setSystemUiVisibility(
             View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
@@ -120,7 +122,7 @@ public final class EngineActivity extends Activity {
         fpsText.setTextSize(11);
         fpsText.setMaxLines(2);
         fpsText.setGravity(android.view.Gravity.CENTER_HORIZONTAL);
-        fpsText.setText("FPS  |  GPU statistics loading…");
+        fpsText.setText("FPS  |  Thermal loading…  |  GPU statistics loading…");
         root.addView(fpsText, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             android.view.Gravity.TOP | android.view.Gravity.CENTER_HORIZONTAL));
@@ -400,7 +402,7 @@ public final class EngineActivity extends Activity {
         fpsFrames = stats[0];
         skippedAt = stats[5];
         lastFps = (long) fps;
-        if (fpsText != null) fpsText.setText(PerformanceHud.format(fps, stats, skipped, seconds));
+        if (fpsText != null) fpsText.setText(PerformanceHud.format(fps, stats, skipped, seconds, thermalStatus.read()));
     }
 
     // --- lifecycle -----------------------------------------------------------
