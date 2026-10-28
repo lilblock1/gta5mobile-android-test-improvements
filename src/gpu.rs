@@ -1499,6 +1499,56 @@ impl Gpu {
             }
         }
     }
+    // Trigger when physical GPU buffers exceed 45k. Evict at most the oldest
+    // 10k recoverable allocations, spread over frames to avoid an FPS hitch.
+    // Never delete the guest's object ID: all evictions are rehydratable.
+    fn trim_gpu_buffers(&mut self) {
+        if !cfg!(target_os = "android") { return; }
+        if self.eviction_pending.is_empty()
+            && self.live_gpu_buffer_count > GPU_BUFFER_SOFT_LIMIT
+            && self.presents.saturating_sub(self.eviction_last_scan_frame) >= 300
+        {
+            self.eviction_last_scan_frame = self.presents;
+            let mut candidates: Vec<(u64, u32)> = self.objs.iter().enumerate().filter_map(|(index, obj)| {
+                let Obj::Buf(b) = obj.as_ref()? else { return None; };
+                if b.gpu.is_none()
+                    || !can_restore_buffer(b.restore_usage.is_some(), b.restore_zero, b.restore_data.is_some())
+                    || !resource_cold(self.presents, b.born_frame, b.last_used_frame, GPU_EVICT_COLD_FRAMES)
+                { return None; }
+                Some((b.last_used_frame.unwrap_or(b.born_frame), index as u32))
+            }).collect();
+            candidates.sort_unstable();
+            for (_, id) in candidates {
+                if self.eviction_pending.len() >= GPU_BUFFER_SWEEP_GOAL { break; }
+                if !self.is_bound(id) && !self.used(id) { self.eviction_pending.push_back(id); }
+            }
+            log(&format!(
+                "gpu eviction: pressure {} physical buffers (soft limit {}), queued {} oldest recoverable buffers (target {}); never evict unbacked guest data",
+                self.live_gpu_buffer_count, GPU_BUFFER_SOFT_LIMIT, self.eviction_pending.len(), GPU_BUFFER_SWEEP_GOAL
+            ));
+        }
+        for _ in 0..GPU_EVICT_PER_FRAME {
+            let Some(id) = self.eviction_pending.pop_front() else { break };
+            let safe = self.buf(id).is_some_and(|b| {
+                b.gpu.is_some()
+                    && can_restore_buffer(b.restore_usage.is_some(), b.restore_zero, b.restore_data.is_some())
+                    && resource_cold(self.presents, b.born_frame, b.last_used_frame, GPU_EVICT_COLD_FRAMES)
+            });
+            if !safe || self.is_bound(id) || self.used(id) { continue; }
+            self.invalidate_cached_bind_groups_for(id);
+            self.invalidate_views_of_resource(id);
+            let Some(b) = self.buf_mut(id) else { continue };
+            let Some(gpu) = b.gpu.take() else { continue };
+            b.deferred_usage = b.restore_usage;
+            let size = b.bytes;
+            // GPU submissions that already own a handle finish normally.
+            // This is only selected for buffers idle for >=600 presented frames.
+            gpu.destroy();
+            self.live_gpu_buffer_count = self.live_gpu_buffer_count.saturating_sub(1);
+            self.live_gpu_buffer_bytes = self.live_gpu_buffer_bytes.saturating_sub(size);
+            self.evicted_buffers += 1;
+        }
+    }
     fn view_obj(&self, id: u32) -> Option<&ViewObj> {
         match self.obj(id) { Some(Obj::Srv(v)) | Some(Obj::Uav(v)) => Some(v), _ => None }
     }
@@ -3436,6 +3486,7 @@ impl Gpu {
                 self.queue.write_buffer(&g, 0, &data);
             }
             self.use_buf(res);
+            self.discard_buffer_backup(res);
             return;
         }
         self.materialize_clears(res);
@@ -3493,7 +3544,12 @@ impl Gpu {
             let (Some(sg), Some(dg)) = (self.gpu_buffer(src), self.gpu_buffer(dst)) else { return };
             let size = if has_box { (r - l) as u64 } else { src_size.min(dst_size) };
             let size = size & !3;
-            if size > 0 { self.encoder().copy_buffer_to_buffer(&sg, if has_box { l as u64 } else { 0 }, &dg, dx as u64, size); }
+            if size > 0 {
+                self.encoder().copy_buffer_to_buffer(&sg, if has_box { l as u64 } else { 0 }, &dg, dx as u64, size);
+                // A GPU copy changes the destination. Without mirroring that
+                // copy in CPU data we cannot safely rehydrate this buffer.
+                self.discard_buffer_backup(dst);
+            }
             self.use_buf(src);
             self.use_buf(dst);
             return;
@@ -3873,6 +3929,7 @@ impl Gpu {
         self.end_pass();
         let Some(cb) = self.counter_buffer(res) else { return };
         self.encoder().copy_buffer_to_buffer(&src, slot * 4, &cb, 0, 4);
+        self.discard_buffer_backup(res);
         self.use_buf(res);
     }
     fn copy_counter(&mut self, dst: u32, offset: u64, uav: u32) {
@@ -3881,6 +3938,7 @@ impl Gpu {
         let Some(cb) = self.counter_buffer(res) else { return };
         self.end_pass();
         self.encoder().copy_buffer_to_buffer(&cb, 0, &dg, offset, 4);
+        self.discard_buffer_backup(dst);
         self.use_buf(dst);
         self.use_buf(res);
     }
@@ -3985,6 +4043,7 @@ impl Gpu {
         self.collect_pipelines();
         self.presents += 1;
         PRESENTS.store(self.presents, Ordering::Relaxed);
+        self.trim_gpu_buffers();
         // Update HUD telemetry at most once per second. All values are already
         // maintained incrementally by create/destroy and pipeline bookkeeping.
         // Full wgpu diagnostics remain on the existing 10-second log cadence.
@@ -4067,6 +4126,12 @@ impl Gpu {
             log(&format!(
                 "gpu buffer allocation: physical GPU buffers {}, deferred/unallocated vertex-index buffers {}, activations {}, physical MiB {}",
                 self.live_gpu_buffer_count, deferred, self.deferred_buffer_allocations, self.live_gpu_buffer_bytes >> 20
+            ));
+            log(&format!(
+                "gpu eviction stats: soft limit {} target {} oldest, pending {}, evicted {}, restored {}, CPU backup {} MiB/{} MiB; no forced deletion of unrecoverable buffers",
+                GPU_BUFFER_SOFT_LIMIT, GPU_BUFFER_SWEEP_GOAL, self.eviction_pending.len(),
+                self.evicted_buffers, self.restored_buffers, self.restore_data_bytes >> 20,
+                GPU_RESTORE_BUDGET >> 20
             ));
             // Report idle GPU allocations without deleting guest-owned
             // resources: residency can only be reclaimed safely after the
@@ -4219,6 +4284,14 @@ fn resource_cold(frame: u64, born: u64, last_used: Option<u64>, threshold: u64) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn buffer_recovery_eligibility_is_strict() {
+        assert!(can_restore_buffer(true, true, false)); // untouched zero buffer
+        assert!(can_restore_buffer(true, false, true)); // complete CPU copy
+        assert!(!can_restore_buffer(true, false, false)); // writes with no backup
+        assert!(!can_restore_buffer(false, true, true)); // storage/UAV/counter
+    }
 
     #[test]
     fn buffer_deferral_never_applies_to_gpu_writable_or_complex_buffers() {
