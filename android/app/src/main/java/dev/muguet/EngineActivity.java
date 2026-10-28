@@ -56,6 +56,7 @@ public final class EngineActivity extends Activity {
     private static native int nativeLastInputDevice();
     private static native int nativeTouchContext();
     private static native int nativeFps();
+    private static native long[] nativePerfStats();
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private SurfaceView surface;
@@ -71,7 +72,7 @@ public final class EngineActivity extends Activity {
     private final HashSet<String> keyboardKeys = new HashSet<>();
     private final HashSet<Integer> padKeys = new HashSet<>();
     private float accLookX, accLookY;
-    private long fpsAt, fpsFrames, lastFps;
+    private long fpsAt, fpsFrames, skippedAt, lastFps;
     private String statusMessage = "Starting engine…";
 
     @Override public void onCreate(Bundle state) {
@@ -116,6 +117,10 @@ public final class EngineActivity extends Activity {
         fpsText = new TextView(this);
         fpsText.setTextColor(0xccffffff); fpsText.setTextSize(12);
         fpsText.setPadding(8, 8, 8, 8); fpsText.setShadowLayer(4, 0, 0, 0xff000000);
+        fpsText.setTextSize(11);
+        fpsText.setMaxLines(2);
+        fpsText.setGravity(android.view.Gravity.CENTER_HORIZONTAL);
+        fpsText.setText("FPS  |  GPU statistics loading…");
         root.addView(fpsText, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             android.view.Gravity.TOP | android.view.Gravity.CENTER_HORIZONTAL));
@@ -378,13 +383,24 @@ public final class EngineActivity extends Activity {
 
     private void updateFps() {
         long now = System.nanoTime();
-        long frames = nativeFps();
-        if (fpsAt == 0) { fpsAt = now; fpsFrames = frames; return; }
-        long elapsed = now - fpsAt;
-        if (elapsed < 500_000_000L) return;
-        float fps = (frames - fpsFrames) * 100.0f / (elapsed / 1e9f);
-        fpsAt = now; fpsFrames = frames; lastFps = (long) fps;
-        if (fpsText != null) fpsText.setText(String.format(java.util.Locale.ROOT, "%.0f FPS", fps));
+        // Do not call JNI or update TextView until a full second has elapsed.
+        if (fpsAt != 0 && now - fpsAt < 1_000_000_000L) return;
+        long[] stats = nativePerfStats();
+        if (stats == null || stats.length < PerformanceHud.STATS_COUNT) return;
+        if (fpsAt == 0) {
+            fpsAt = now;
+            fpsFrames = stats[0];
+            skippedAt = stats[5];
+            return;
+        }
+        double seconds = (now - fpsAt) / 1e9;
+        float fps = (float) Math.max(0, stats[0] - fpsFrames) / (float) seconds;
+        long skipped = Math.max(0, stats[5] - skippedAt);
+        fpsAt = now;
+        fpsFrames = stats[0];
+        skippedAt = stats[5];
+        lastFps = (long) fps;
+        if (fpsText != null) fpsText.setText(PerformanceHud.format(fps, stats, skipped, seconds));
     }
 
     // --- lifecycle -----------------------------------------------------------
