@@ -40,7 +40,7 @@ public final class DriverBridge {
             File meta = new File(dir, "meta.json");
             String library = "libvulkan_freedreno.so";
             if (meta.isFile()) {
-                library = new JSONObject(Files.readString(meta.toPath(), StandardCharsets.UTF_8))
+                library = new JSONObject(new String(Files.readAllBytes(meta.toPath()), StandardCharsets.UTF_8))
                     .optString("libraryName", library);
             }
             if (!library.matches("[A-Za-z0-9_.-]+\\.so") || !new File(dir, library).isFile())
