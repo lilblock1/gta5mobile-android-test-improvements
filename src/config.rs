@@ -204,7 +204,7 @@ fn locate() -> anyhow::Result<PathBuf> {
     Ok(build)
 }
 
-const SETTING_VARS: &[&str] = &["MUGUET_SCALE", "MUGUET_MOUSE_SENS", "MUGUET_TOUCH_SENS", "MUGUET_RES", "MUGUET_FULLSCREEN", "MUGUET_MUTE", "MUGUET_HOST", "MUGUET_SERVER", "MUGUET_NAME"];
+const SETTING_VARS: &[&str] = &["MUGUET_SCALE", "MUGUET_MOUSE_SENS", "MUGUET_TOUCH_SENS", "MUGUET_RES", "MUGUET_FULLSCREEN", "MUGUET_MUTE", "MUGUET_HOST", "MUGUET_SERVER", "MUGUET_NAME", "MUGUET_RENDER_FPS_LIMIT"];
 
 #[cfg(target_os = "ios")]
 pub fn reload() -> Vec<String> {
@@ -276,10 +276,23 @@ fn settings(cfg_path: &Path) -> Vec<String> {
 
     let extra_args: Vec<&str> = cfg.get("extra_args").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str()).collect()).unwrap_or_default();
     let fps = std::env::var("MUGUET_FPS").ok().and_then(|v| v.parse::<f64>().ok()).or_else(|| num("fps_limit")).unwrap_or(60.0);
-    // The launcher owns the frame limit when it set one: sending two
-    // -frameLimit values would leave the engine to guess which wins.
-    if !extra_args.iter().any(|a| a.starts_with("-frameLimit")) {
-        engine_args.push(format!("-frameLimit={}", if fps <= 0.0 { 0 } else if fps <= 30.0 { 2 } else { 1 }));
+    // GTA's -frameLimit takes internal pacing modes (1 or 2), NOT a
+    // literal frames-per-second value. Previously the launcher sent 42 and
+    // 24 directly, producing very slow and unstable gameplay. Keep the
+    // engine in a supported mode and pace only requested Android FPS below
+    // 60 at the renderer, without spinning a CPU core.
+    let explicit_frame = extra_args.iter().find_map(|a| {
+        a.strip_prefix("-frameLimit=").and_then(|n| n.parse::<u32>().ok())
+    });
+    let exact_fps = explicit_frame.filter(|n| matches!(n, 24 | 30 | 42 | 60));
+    let target_fps = exact_fps.unwrap_or_else(|| fps.max(0.0).min(120.0).round() as u32);
+    let normalized_frame = exact_fps.or_else(|| (explicit_frame.is_none()).then_some(target_fps));
+    if let Some(target) = normalized_frame {
+        engine_args.push(format!("-frameLimit={}", engine_frame_mode(target)));
+    }
+    if cfg!(target_os = "android") && (1..60).contains(&target_fps) && normalized_frame.is_some() {
+        set_default("MUGUET_RENDER_FPS_LIMIT", target_fps.to_string());
+        eprintln!("[config] host frame pacing {} FPS (engine frame mode {})", target_fps, engine_frame_mode(target_fps));
     }
 
     // The engine reports about 4 GiB of video memory on this phone even as
@@ -301,9 +314,18 @@ fn settings(cfg_path: &Path) -> Vec<String> {
     if !std::env::args().any(|a| a.starts_with("-wasmstartchoice")) {
         engine_args.push(format!("-wasmstartchoice={start_mode}"));
     }
-    engine_args.extend(extra_args.iter().map(|a| String::from(*a)));
+    engine_args.extend(extra_args.iter().filter(|a| {
+        // The launcher numeric FPS selection has already been normalized above.
+        // Preserve custom native engine modes and unrelated arguments verbatim.
+        !(exact_fps.is_some() && a.starts_with("-frameLimit="))
+    }).map(|a| String::from(*a)));
     fix_settings(num("texture_quality").map(|q| q as i64), phone_graphics, phone_lod);
     engine_args
+}
+
+// Native GTA frameLimit is a vsync divisor, not a numeric FPS target.
+fn engine_frame_mode(requested_fps: u32) -> u32 {
+    if requested_fps == 0 { 0 } else if requested_fps <= 30 { 2 } else { 1 }
 }
 
 // The native wasm2c runner already accepts the same engine command-line
@@ -486,6 +508,15 @@ mod tests {
             tag(&apply_settings(SAMPLE, Some(9), false, true, 1), "TextureQuality"),
             r#"<TextureQuality value="2" />"#
         );
+    }
+
+    #[test]
+    fn frame_limit_mode_is_not_a_literal_fps_value() {
+        assert_eq!(engine_frame_mode(24), 2);
+        assert_eq!(engine_frame_mode(30), 2);
+        assert_eq!(engine_frame_mode(42), 1);
+        assert_eq!(engine_frame_mode(60), 1);
+        assert_eq!(engine_frame_mode(0), 0);
     }
 
     #[test]
