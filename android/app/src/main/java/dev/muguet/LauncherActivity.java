@@ -592,7 +592,7 @@ public final class LauncherActivity extends Activity {
     // Only a primary shared-storage tree can become a direct filesystem path.
     // Other providers expose content:// streams, which the native engine cannot
     // open as ordinary game files; app-private dirs are sandboxed by Android.
-    private String gameRootFromTree(Uri tree) {
+    private String sharedPathFromTree(Uri tree) {
         try {
             if (!"com.android.externalstorage.documents".equals(tree.getAuthority())) return null;
             String id = android.provider.DocumentsContract.getTreeDocumentId(tree);
@@ -601,10 +601,14 @@ public final class LauncherActivity extends Activity {
             File base = new File("/storage/emulated/0/", relative).getCanonicalFile();
             File sharedRoot = new File("/storage/emulated/0").getCanonicalFile();
             if (!base.toPath().startsWith(sharedRoot.toPath())) return null;
-            return gameRoot(base.getAbsolutePath());
+            return base.getAbsolutePath();
         } catch (Exception ignored) {
             return null;
         }
+    }
+    private String gameRootFromTree(Uri tree) {
+        String path = sharedPathFromTree(tree);
+        return path == null ? null : gameRoot(path);
     }
 
     // The release wraps the game in a folder: GrandV-assets/mirror/playgta5.com
@@ -912,7 +916,21 @@ public final class LauncherActivity extends Activity {
                 // points at the previously saved folder until settings change.
                 String path = gameRootFromTree(tree);
                 if (path == null) {
-                    status.setText("Cannot read GTA files in the selected folder. Choose a shared-storage folder holding data/ and b/, or grant file access. Android does not allow access to the original app's private installed game.");
+                    // Store a valid shared-storage choice even if all-files
+                    // permission is still missing, so ready() can offer the
+                    // permission button and retry this folder afterwards.
+                    String shared = sharedPathFromTree(tree);
+                    if (shared == null) {
+                        status.setText("Only folders in shared internal storage can be reused. Android blocks access to the original app's private installed game.");
+                        return;
+                    }
+                    settings.put("game_folder_uri", tree.toString());
+                    settings.put("game_folder_path", shared);
+                    saveSettings();
+                    ready();
+                    status.setText(hasAllFilesAccess()
+                        ? "No compatible GTA game found there. Pick a shared folder containing data/ and b/."
+                        : "Selected shared folder. Grant 'All files access' below so the game process can read it.");
                     return;
                 }
                 settings.put("game_folder_uri", tree.toString());
