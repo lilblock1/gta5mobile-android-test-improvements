@@ -7,7 +7,6 @@ use crate::{
 };
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -35,29 +34,31 @@ static STUB_SEQ: AtomicU64 = AtomicU64::new(0);
 // distinct warnings or errors. Bound the table so unique warning strings do
 // not themselves create an unbounded host-memory cache.
 struct WarningCount { last_print: Instant, suppressed: u64 }
-static WARNINGS: LazyLock<Mutex<HashMap<u64, WarningCount>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static WARNINGS: LazyLock<Mutex<HashMap<String, WarningCount>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 const MAX_TRACKED_WARNINGS: usize = 4096;
 
 fn log_engine_line(source: &str, line: &str) {
-    if line.starts_with("Warning:") {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        line.hash(&mut hasher);
-        let key = hasher.finish();
+    let skipped = if line.starts_with("Warning:") {
         let now = Instant::now();
         let mut warnings = WARNINGS.lock().unwrap();
-        if let Some(state) = warnings.get_mut(&key) {
+        if let Some(state) = warnings.get_mut(line) {
             if now.duration_since(state.last_print) < Duration::from_secs(10) {
                 state.suppressed += 1;
                 return;
             }
-            if state.suppressed != 0 {
-                eprintln!("[{source}] repeated warning suppressed {} times in preceding interval", state.suppressed);
-                state.suppressed = 0;
-            }
+            let count = state.suppressed;
+            state.suppressed = 0;
             state.last_print = now;
-        } else if warnings.len() < MAX_TRACKED_WARNINGS {
-            warnings.insert(key, WarningCount { last_print: now, suppressed: 0 });
+            count
+        } else {
+            if warnings.len() < MAX_TRACKED_WARNINGS {
+                warnings.insert(line.to_string(), WarningCount { last_print: now, suppressed: 0 });
+            }
+            0
         }
+    } else { 0 };
+    if skipped != 0 {
+        eprintln!("[{source}] repeated warning suppressed {skipped} times in preceding interval");
     }
     eprintln!("[{source}] {line}");
 }
