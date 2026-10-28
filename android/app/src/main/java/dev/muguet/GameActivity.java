@@ -40,6 +40,10 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
     private long fpsAt, fpsFrames, skippedAt;
 
     @Override public void onCreate(Bundle state) {
+        // Initialize the Vulkan proxy in this process before native rendering.
+        if (!DriverBridge.prepare(this)) {
+            android.util.Log.e("MuguetDriver", DriverBridge.status());
+        }
         super.onCreate(state);
         thermalStatus = new ThermalStatus(this);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
