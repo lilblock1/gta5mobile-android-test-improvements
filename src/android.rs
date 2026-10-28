@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use jni::objects::{JClass, JObject, JObjectArray, JString, JValue};
-use jni::sys::{jboolean, jfloat, jint, jlong, jstring, JNI_FALSE, JNI_TRUE};
+use jni::sys::{jboolean, jfloat, jint, jlong, jlongArray, jstring, JNI_FALSE, JNI_TRUE};
 use jni::{JNIEnv, JavaVM};
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
@@ -148,6 +148,15 @@ pub extern "system" fn Java_dev_muguet_GameActivity_nativeHasFrame(_env: JNIEnv,
 #[no_mangle]
 pub extern "system" fn Java_dev_muguet_GameActivity_nativePresents(_env: JNIEnv, _class: JClass) -> jlong {
     crate::gpu::PRESENTS.load(Ordering::Relaxed) as jlong
+}
+
+// Only called by the existing FPS timer (once per second), never each tick.
+#[no_mangle]
+pub extern "system" fn Java_dev_muguet_GameActivity_nativePerfStats(mut env: JNIEnv, _class: JClass) -> jlongArray {
+    let Ok(array) = env.new_long_array(6) else { return std::ptr::null_mut() };
+    let values = crate::gpu::perf_snapshot().map(|value| value as jlong);
+    if env.set_long_array_region(&array, 0, &values).is_err() { return std::ptr::null_mut(); }
+    array.into_raw()
 }
 
 pub fn release_input() {
