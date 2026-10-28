@@ -773,13 +773,20 @@ struct FifoCache<V> {
     order: VecDeque<Vec<u64>>,
     capacity: usize,
     evictions: u64,
+    hits: AtomicU64,
+    misses: AtomicU64,
 }
 
 impl<V> FifoCache<V> {
     fn new(capacity: usize) -> Self {
-        Self { entries: HashMap::new(), order: VecDeque::new(), capacity, evictions: 0 }
+        Self { entries: HashMap::new(), order: VecDeque::new(), capacity, evictions: 0, hits: AtomicU64::new(0), misses: AtomicU64::new(0) }
     }
-    fn get(&self, key: &[u64]) -> Option<&V> { self.entries.get(key) }
+    fn get(&self, key: &[u64]) -> Option<&V> {
+        let found = self.entries.get(key);
+        if found.is_some() { self.hits.fetch_add(1, Ordering::Relaxed); }
+        else { self.misses.fetch_add(1, Ordering::Relaxed); }
+        found
+    }
     fn len(&self) -> usize { self.entries.len() }
     // Return the evicted or replaced value so callers can retire any
     // dependency bookkeeping along with its GPU handle.
@@ -4200,6 +4207,10 @@ impl Gpu {
             log(&format!("host buffer memory: shadow data {} KiB, allocated {} KiB, declared {} KiB; uniform staging {} KiB; bind group cache {}/{} ({} evictions)",
                 shadow_len >> 10, shadow_capacity >> 10, shadow_declared >> 10, uniform_staging >> 10,
                 self.bind_groups.len(), self.bind_groups.capacity, self.bind_groups.evictions));
+            let bg_hits = self.bind_groups.hits.load(Ordering::Relaxed);
+            let bg_misses = self.bind_groups.misses.load(Ordering::Relaxed);
+            log(&format!("bind group cache effectiveness: hits {} misses {} hit-rate {:.1}% (cumulative)",
+                bg_hits, bg_misses, 100.0 * bg_hits as f64 / (bg_hits + bg_misses).max(1) as f64));
             log(&format!(
                 "gpu cache ownership: referenced engine resources {}, shader layouts {}, compute variants {}, pipeline FIFO keys {}",
                 self.bg_dependents.len(), self.bgl_cache.len(), self.compute.len(), self.pipeline_fifo.len()
