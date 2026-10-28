@@ -102,6 +102,11 @@ if (project.hasProperty('withDriverProxy') && project.property('withDriverProxy'
     tasks.register('packageDriverProxy', Copy) {
         dependsOn 'compileDriverProxy'
         from(fileTree(proxyBuildDir) { include '**/libvulkan.so', '**/libmain_hook.so', '**/libhook_impl.so' })
+        // CMake places hook libraries under nested _deps/... directories.
+        // Flatten only these three known filenames into Android's ABI folder.
+        eachFile { details -> details.path = details.name }
+        includeEmptyDirs = false
+        duplicatesStrategy = DuplicatesStrategy.FAIL
         into file('src/main/jniLibs/arm64-v8a')
         doLast {
             ['libvulkan.so', 'libmain_hook.so', 'libhook_impl.so'].each { name ->
