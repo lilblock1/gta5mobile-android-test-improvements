@@ -3786,6 +3786,10 @@ impl Gpu {
                 shadow_len >> 10, shadow_capacity >> 10, shadow_declared >> 10, uniform_staging >> 10,
                 self.bind_groups.len(), self.bind_groups.capacity, self.bind_groups.evictions));
             log(&format!(
+                "gpu cache ownership: referenced engine resources {}, shader layouts {}, compute variants {}, pipeline FIFO keys {}",
+                self.bg_dependents.len(), self.bgl_cache.len(), self.compute.len(), self.pipeline_fifo.len()
+            ));
+            log(&format!(
                 "gpu stalls: frame-slot waits {} avg {:.3} ms max {:.3} ms | pipeline cache {}/{} entries, compiling {}, FIFO evictions {}",
                 self.frame_waits,
                 if self.frame_waits == 0 { 0.0 } else { self.frame_wait_ns as f64 / self.frame_waits as f64 / 1e6 },
@@ -3951,6 +3955,30 @@ mod tests {
         disabled.insert(vec![1], 1);
         assert_eq!(disabled.len(), 0);
         assert!(disabled.order.is_empty());
+    }
+
+    #[test]
+    fn cache_resource_invalidation_preserves_fifo_and_frees_references() {
+        let mut cache = FifoCache::new(2);
+        let hold = Arc::new(());
+        let weak = Arc::downgrade(&hold);
+        cache.insert(vec![1], (hold, vec![91u32]));
+        cache.insert(vec![2], (Arc::new(()), vec![92u32]));
+        let removed = cache.remove_key(&[1]).expect("owned bind group should be removed");
+        assert_eq!(removed.1, vec![91]);
+        assert_eq!(cache.order.len(), cache.len());
+        assert_eq!(weak.strong_count(), 1);
+        drop(removed);
+        assert!(weak.upgrade().is_none());
+        // Reusing an invalidated key must not leave a duplicate FIFO entry.
+        cache.insert(vec![1], (Arc::new(()), vec![93u32]));
+        assert_eq!(cache.order.len(), 2);
+        let removed = cache.remove_where(|_, v| v.1.contains(&92));
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].0, vec![2]);
+        assert_eq!(cache.order.len(), cache.len());
+        cache.insert(vec![3], (Arc::new(()), vec![94u32]));
+        assert_eq!(cache.order.len(), 2);
     }
 
     #[test]
