@@ -247,8 +247,11 @@ pub fn handle(name: &str, mem: &SharedMemory, p: &[Val], results: &mut [Val]) ->
                 Some(Entry::File { file, .. }) => {
                     let mut total = 0u64;
                     let mut off = offset;
+                    // Reuse one read buffer across an iovec call instead of
+                    // allocating separately for every scatter/gather entry.
+                    let mut buf = Vec::new();
                     for (ptr, len) in iov {
-                        let mut buf = vec![0u8; len as usize];
+                        buf.resize(len as usize, 0);
                         let n = match off {
                             Some(o) => file.read_at(&mut buf, o).unwrap_or(0),
                             None => file.read(&mut buf).unwrap_or(0),
