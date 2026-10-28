@@ -1934,11 +1934,16 @@ impl Gpu {
     fn upload_buffer(&mut self, id: u32, offset: u64, size: u64, data_addr: u64, no_overwrite: bool) {
         let data = self.bytes(data_addr, size).to_vec();
         let used = self.used(id);
+        let frame = self.presents;
         let Some(b) = self.buf_mut(id) else { return };
         if let Err(e) = b.update_shadow(offset, &data) {
             log_once("shadow-allocation", &format!("constant buffer shadow upload id={id} offset={offset} size={size} failed: {e:#}"));
             return;
         }
+        // Uploads are genuine resource activity even if the geometry has not
+        // yet been bound to a draw. Previously these were falsely classified
+        // as "never used" and cold after 600 frames.
+        if size > 0 { b.last_used_frame = Some(frame); }
         let Some(g) = self.gpu_buffer(id) else { return };
         if !no_overwrite && used { self.flush(); }
         let n = size & !3;
@@ -1960,12 +1965,14 @@ impl Gpu {
         let was_used = self.used(id);
         if pending_clear { self.materialize_clears(id); }
         if pending_clear || was_used { self.flush(); }
+        let frame = self.presents;
         let t = self.tex_mut(id).unwrap();
         if let Some(p) = t.proxy_fdepth.as_mut() { p.dirty = true; }
         let three = t.desc.dim == TextureDimension::D3;
         let (tex, format, a8, compressed_source) = (t.tex.clone(), t.format, t.a8, t.compressed_source);
         let (w, h) = (w.min((t.desc.w >> mip).max(1).saturating_sub(x)), h.min((t.desc.h >> mip).max(1).saturating_sub(y)));
         if w == 0 || h == 0 { return; }
+        t.last_used_frame = Some(frame);
         // The common uncompressed path does not transform the payload: pass
         // the existing engine memory to wgpu instead of allocating and copying
         // an entire texture upload. BC fallback and A8 conversion still use
@@ -3997,7 +4004,7 @@ impl Gpu {
                 }
             }
             log(&format!(
-                "gpu residency: buffers never used {} cold(600 frames) {} ({} MiB), textures never used {} cold(600 frames) {}; guest-owned objects are NOT automatically evicted",
+                "gpu residency: buffers never accessed/uploaded {} cold(600 frames) {} ({} MiB), textures never accessed/uploaded {} cold(600 frames) {}; guest-owned objects are NOT automatically evicted",
                 never[0], cold[0], cold_gpu_buffer_bytes >> 20, never[1], cold[1]
             ));
             let (shadow_len, shadow_capacity, shadow_declared) = self.objs.iter().fold((0u64, 0u64, 0u64), |(len, cap, declared), obj| {
