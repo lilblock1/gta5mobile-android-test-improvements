@@ -700,6 +700,9 @@ struct Buf {
     stride: u32,
     gpu: Option<Buffer>,
     bytes: u64,
+    // Some only for eligible vertex/index buffers whose physical allocation
+    // can be postponed until the first upload, copy, draw or readback.
+    deferred_usage: Option<BufferUsages>,
     shadow: Option<Vec<u8>>,
     version: u64,
     enc: u64,
@@ -707,6 +710,12 @@ struct Buf {
     born_frame: u64,
     last_used_frame: Option<u64>,
     counter: Option<Buffer>,
+}
+
+// Restrict deferral to single-purpose vertex/index buffers. Complex bind flags
+// and misc usage (including indirect/UAV storage) retain eager allocation.
+fn lazy_vertex_index_buffer(bind: u32, misc: u32) -> bool {
+    misc == 0 && bind & 3 != 0 && bind & !3 == 0
 }
 
 impl Buf {
@@ -1067,6 +1076,8 @@ pub struct Gpu {
     resource_destroys: [u64; 3],
     resource_replacements: u64,
     live_gpu_buffer_bytes: u64,
+    live_gpu_buffer_count: u64,
+    deferred_buffer_allocations: u64,
     hud_last_sample: Instant,
     enc: Option<CommandEncoder>,
     enc_epoch: u64,
@@ -1307,7 +1318,8 @@ impl Gpu {
             instance: instance.clone(), pending_clears: HashMap::new(), clears_folded: 0, pipe_jobs, pipe_results, pipe_pending: HashMap::new(), pending_skips: 0, pending_skips0: 0,
             base, mem, ring, device, queue, adapter, surface, surface_format, surface_size: (0, 0),
             objs: Vec::new(), resource_creates: [0; 3], resource_destroys: [0; 3],
-            resource_replacements: 0, live_gpu_buffer_bytes: 0, hud_last_sample: Instant::now(),
+            resource_replacements: 0, live_gpu_buffer_bytes: 0, live_gpu_buffer_count: 0,
+            deferred_buffer_allocations: 0, hud_last_sample: Instant::now(),
             enc: None, enc_epoch: 1, pass: None, pass_key: None, pass_info: None, pass_st: PassSt::default(),
             s: State::new(), pdirty: true, last_pl: None, shader_index, shader_dir, next_uid: 1,
             bgl_cache: HashMap::new(), empty_bgl: None, pipelines: HashMap::new(),
@@ -1369,7 +1381,10 @@ impl Gpu {
         match &o {
             Obj::Buf(b) => {
                 self.resource_creates[0] += 1;
-                self.live_gpu_buffer_bytes = self.live_gpu_buffer_bytes.saturating_add(b.bytes);
+                if b.gpu.is_some() {
+                    self.live_gpu_buffer_bytes = self.live_gpu_buffer_bytes.saturating_add(b.bytes);
+                    self.live_gpu_buffer_count += 1;
+                }
             },
             Obj::Tex(_) => self.resource_creates[1] += 1,
             Obj::Srv(_) | Obj::Uav(_) => self.resource_creates[2] += 1,
@@ -1391,6 +1406,26 @@ impl Gpu {
     }
     fn buf_mut(&mut self, id: u32) -> Option<&mut Buf> {
         match self.obj_mut(id) { Some(Obj::Buf(b)) => Some(b), _ => None }
+    }
+    // On-demand backing is safe for vertex/index buffers: wgpu guarantees
+    // zero-initialized contents, and all uploads, copies and draws materialize
+    // the same independent buffer before it is accessed.
+    fn gpu_buffer(&mut self, id: u32) -> Option<Buffer> {
+        let (usage, bytes) = {
+            let b = self.buf(id)?;
+            if let Some(gpu) = &b.gpu { return Some(gpu.clone()); }
+            (b.deferred_usage?, b.bytes)
+        };
+        let gpu = self.device.create_buffer(&BufferDescriptor {
+            label: None, size: bytes, usage, mapped_at_creation: false,
+        });
+        let b = self.buf_mut(id)?;
+        b.gpu = Some(gpu.clone());
+        b.deferred_usage = None;
+        self.live_gpu_buffer_bytes = self.live_gpu_buffer_bytes.saturating_add(bytes);
+        self.live_gpu_buffer_count += 1;
+        self.deferred_buffer_allocations += 1;
+        Some(gpu)
     }
     fn view_obj(&self, id: u32) -> Option<&ViewObj> {
         match self.obj(id) { Some(Obj::Srv(v)) | Some(Obj::Uav(v)) => Some(v), _ => None }
@@ -1741,7 +1776,10 @@ impl Gpu {
                 }
                 Obj::Buf(b) => {
                     self.resource_destroys[0] += 1;
-                    self.live_gpu_buffer_bytes = self.live_gpu_buffer_bytes.saturating_sub(b.bytes);
+                    if b.gpu.is_some() {
+                        self.live_gpu_buffer_bytes = self.live_gpu_buffer_bytes.saturating_sub(b.bytes);
+                        self.live_gpu_buffer_count = self.live_gpu_buffer_count.saturating_sub(1);
+                    }
                     self.invalidate_views_of_resource(id);
                     if let Some(g) = b.gpu { g.destroy(); }
                     if let Some(counter) = b.counter { counter.destroy(); }
@@ -1873,7 +1911,8 @@ impl Gpu {
         // The shadow of a constant buffer holds only what the engine uploaded.
         // Allocating the full buffer size upfront costs host memory for every
         // constant buffer the engine creates, and it never shrinks.
-        let mut b = Buf { size, stride, gpu: None, bytes: 0, shadow: None, version: 0, enc: 0, in_bg: false,
+        let mut b = Buf { size, stride, gpu: None, bytes: 0, deferred_usage: None,
+            shadow: None, version: 0, enc: 0, in_bg: false,
             born_frame: self.presents, last_used_frame: None, counter: None };
         if bind & 4 != 0 { b.shadow = Some(Vec::new()); }
         let mut usage = BufferUsages::COPY_DST | BufferUsages::COPY_SRC;
@@ -1883,7 +1922,11 @@ impl Gpu {
         if misc & 0x10 != 0 { usage |= BufferUsages::INDIRECT; }
         if bind & (1 | 2 | 8 | 0x80) != 0 || misc & 0x10 != 0 {
             b.bytes = ((size + 3) & !3).max(4);
-            b.gpu = Some(self.device.create_buffer(&BufferDescriptor { label: None, size: b.bytes, usage, mapped_at_creation: false }));
+            if lazy_vertex_index_buffer(bind, misc) {
+                b.deferred_usage = Some(usage);
+            } else {
+                b.gpu = Some(self.device.create_buffer(&BufferDescriptor { label: None, size: b.bytes, usage, mapped_at_creation: false }));
+            }
         }
         self.set_obj(id, Obj::Buf(b));
     }
@@ -1896,7 +1939,7 @@ impl Gpu {
             log_once("shadow-allocation", &format!("constant buffer shadow upload id={id} offset={offset} size={size} failed: {e:#}"));
             return;
         }
-        let Some(g) = b.gpu.clone() else { return };
+        let Some(g) = self.gpu_buffer(id) else { return };
         if !no_overwrite && used { self.flush(); }
         let n = size & !3;
         if n > 0 { self.queue.write_buffer(&g, offset, &data[..n as usize]); }
@@ -3854,7 +3897,7 @@ impl Gpu {
         // Full wgpu diagnostics remain on the existing 10-second log cadence.
         if self.hud_last_sample.elapsed() >= Duration::from_secs(1) {
             HUD_BUFFER_BYTES.store(self.live_gpu_buffer_bytes, Ordering::Relaxed);
-            HUD_LIVE_BUFFERS.store(self.resource_creates[0].saturating_sub(self.resource_destroys[0]), Ordering::Relaxed);
+            HUD_LIVE_BUFFERS.store(self.live_gpu_buffer_count, Ordering::Relaxed);
             HUD_LIVE_TEXTURES.store(self.resource_creates[1].saturating_sub(self.resource_destroys[1]), Ordering::Relaxed);
             HUD_COMPILING.store(self.pipe_pending.len() as u64, Ordering::Relaxed);
             HUD_SKIPPED_DRAWS.store(self.pending_skips, Ordering::Relaxed);
@@ -3914,7 +3957,7 @@ impl Gpu {
                 match obj {
                     Obj::Buf(b) => {
                         live[0] += 1;
-                        live_gpu_buffer_bytes = live_gpu_buffer_bytes.saturating_add(b.bytes);
+                        if b.gpu.is_some() { live_gpu_buffer_bytes = live_gpu_buffer_bytes.saturating_add(b.bytes); }
                     }
                     Obj::Tex(_) => live[1] += 1,
                     Obj::Srv(_) | Obj::Uav(_) => live[2] += 1,
@@ -3927,6 +3970,11 @@ impl Gpu {
                 self.resource_destroys[0], self.resource_destroys[1], self.resource_destroys[2],
                 live[0], live[1], live[2], live_gpu_buffer_bytes >> 20, self.resource_replacements,
             ));
+            let deferred = self.objs.iter().filter(|entry| matches!(entry, Some(Obj::Buf(b)) if b.deferred_usage.is_some())).count();
+            log(&format!(
+                "gpu buffer allocation: physical GPU buffers {}, deferred/unallocated vertex-index buffers {}, activations {}, physical MiB {}",
+                self.live_gpu_buffer_count, deferred, self.deferred_buffer_allocations, self.live_gpu_buffer_bytes >> 20
+            ));
             // Report idle GPU allocations without deleting guest-owned
             // resources: residency can only be reclaimed safely after the
             // engine unbinds/releases an object or supplies data to restore it.
@@ -3935,7 +3983,7 @@ impl Gpu {
             let mut cold_gpu_buffer_bytes = 0u64;
             for obj in self.objs.iter().flatten() {
                 let (kind, born, used, bytes) = match obj {
-                    Obj::Buf(b) => (0, b.born_frame, b.last_used_frame, b.bytes),
+                    Obj::Buf(b) => (0, b.born_frame, b.last_used_frame, if b.gpu.is_some() { b.bytes } else { 0 }),
                     Obj::Tex(t) => (1, t.born_frame, t.last_used_frame, 0),
                     _ => continue,
                 };
@@ -4080,6 +4128,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn buffer_deferral_never_applies_to_gpu_writable_or_complex_buffers() {
+        assert!(lazy_vertex_index_buffer(1, 0));
+        assert!(lazy_vertex_index_buffer(2, 0));
+        assert!(lazy_vertex_index_buffer(3, 0));
+        assert!(!lazy_vertex_index_buffer(0, 0));
+        assert!(!lazy_vertex_index_buffer(4, 0));
+        assert!(!lazy_vertex_index_buffer(1 | 8, 0));
+        assert!(!lazy_vertex_index_buffer(1 | 0x80, 0));
+        assert!(!lazy_vertex_index_buffer(1, 0x10));
+        assert!(!lazy_vertex_index_buffer(1, 1));
+    }
+
+    #[test]
     fn resource_age_classification_never_reclaims_live_gpu_state() {
         assert!(!resource_cold(100, 80, None, 600));
         assert!(resource_cold(700, 80, None, 600));
@@ -4106,7 +4167,8 @@ mod tests {
     }
 
     fn shadow_buffer(size: u64) -> Buf {
-        Buf { size, stride: 0, gpu: None, bytes: 0, shadow: Some(Vec::new()), version: 0, enc: 0, in_bg: false,
+        Buf { size, stride: 0, gpu: None, bytes: 0, deferred_usage: None,
+            shadow: Some(Vec::new()), version: 0, enc: 0, in_bg: false,
             born_frame: 0, last_used_frame: None, counter: None }
     }
 
