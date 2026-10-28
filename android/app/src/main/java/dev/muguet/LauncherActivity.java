@@ -29,6 +29,7 @@ public final class LauncherActivity extends Activity {
     private static final int PICK_FOLDER = 3;
     private static final int PICK_SAVE_ZIP = 4;
     private static final int PICK_SAVE_LOG = 6;
+    private static final int PICK_DRIVER_ZIP = 7;
     private static final String DEFAULT_MAGNET =
         "magnet:?xt=urn:btih:60a2d95f23154e4f7c75a965307133c24d9c7178&dn=GrandV-assets"
         + "&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce"
@@ -229,6 +230,36 @@ public final class LauncherActivity extends Activity {
             startActivityForResult(intent, PICK_ZIP);
         });
         column.addView(importButton);
+        Button driverImport = new Button(this);
+        driverImport.setText("Import Vulkan driver ZIP (experimental)");
+        driverImport.setOnClickListener(v -> {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType("application/zip");
+            startActivityForResult(intent, PICK_DRIVER_ZIP);
+        });
+        column.addView(driverImport);
+        Button driverChoice = new Button(this);
+        driverChoice.setText("Vulkan driver: " + DriverPackages.selected(this));
+        driverChoice.setOnClickListener(v -> {
+            java.util.ArrayList<String> choices = new java.util.ArrayList<>();
+            choices.add("system");
+            File[] packages = DriverPackages.root(this).listFiles();
+            if (packages != null) for (File file : packages) {
+                if (file.isDirectory() && file.getName().matches("[A-Za-z0-9_-]{1,64}"))
+                    choices.add("custom:" + file.getName());
+            }
+            new AlertDialog.Builder(this).setTitle("Requested Vulkan driver")
+                .setItems(choices.toArray(new String[0]), (dialog, index) -> {
+                    try {
+                        DriverPackages.select(this, choices.get(index));
+                        driverChoice.setText("Vulkan driver: " + choices.get(index));
+                        status.setText("Driver choice saved. Custom driver activation is not wired to Vulkan yet; system driver remains active.");
+                    } catch (IOException e) { status.setText("Cannot save driver choice: " + e.getMessage()); }
+                }).show();
+        });
+        column.addView(driverChoice);
+
         // Not everyone has the game data as a ZIP. A folder that already holds
         // data/ and b/<build>/ works just as well, and is used where it lies, so
         // nothing is copied and the phone needs no free space for it.
@@ -863,6 +894,21 @@ public final class LauncherActivity extends Activity {
     }
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == PICK_DRIVER_ZIP) {
+            if (result == RESULT_OK && data != null && data.getData() != null) {
+                status.setText("Validating driver package…");
+                worker.execute(() -> {
+                    try {
+                        String name = DriverPackages.importZip(this, data.getData());
+                        runOnUiThread(() -> status.setText("Imported " + name + ". Select it in Vulkan driver settings. Native driver activation is not enabled yet."));
+                    } catch (Exception e) {
+                        runOnUiThread(() -> status.setText("Driver import failed: " + e.getMessage()));
+                    }
+                });
+            }
+            return;
+        }
+
         if (request == PICK_SAVE_ZIP) {
             if (result == RESULT_OK && data != null && data.getData() != null) backupSaves(data.getData());
             else if (result != RESULT_CANCELED) status.setText("No location chosen for the backup.");
