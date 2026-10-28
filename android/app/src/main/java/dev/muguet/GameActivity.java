@@ -31,6 +31,7 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
     private final HashSet<String> keyboardKeys = new HashSet<>();
     private TouchControls controls;
     private TextView status, fpsText;
+    private ThermalStatus thermalStatus;
     private InputManagerCompat devices;
     private boolean active, focused, controller, inCar;
     private float lx, ly, rx, ry, lt, rt, hx, hy;
@@ -40,6 +41,7 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        thermalStatus = new ThermalStatus(this);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
@@ -54,7 +56,7 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
         fpsText.setTextSize(11);
         fpsText.setMaxLines(2);
         fpsText.setGravity(Gravity.CENTER_HORIZONTAL);
-        fpsText.setText("FPS  |  GPU statistics loading…");
+        fpsText.setText("FPS  |  Thermal loading…  |  GPU statistics loading…");
         devices = new InputManagerCompat(this, this);
         // The native Vulkan surface owns the activity window, so HUD views added to
         // the content view sit below it. A panel sub-window composites above the
@@ -318,6 +320,6 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
         fpsAt = now;
         fpsFrames = stats[0];
         skippedAt = stats[5];
-        if (fpsText != null) fpsText.setText(PerformanceHud.format(fps, stats, skipped, seconds));
+        if (fpsText != null) fpsText.setText(PerformanceHud.format(fps, stats, skipped, seconds, thermalStatus.read()));
     }
 }
