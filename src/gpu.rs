@@ -723,29 +723,37 @@ impl<V> FifoCache<V> {
     fn len(&self) -> usize { self.entries.len() }
     // Return the evicted or replaced value so callers can retire any
     // dependency bookkeeping along with its GPU handle.
-    fn insert(&mut self, key: Vec<u64>, value: V) -> Option<V> {
-        if self.capacity == 0 { return Some(value); }
+    fn insert(&mut self, key: Vec<u64>, value: V) -> Option<(Vec<u64>, V)> {
+        if self.capacity == 0 { return Some((key, value)); }
         if let Some(existing) = self.entries.get_mut(&key) {
-            return Some(std::mem::replace(existing, value));
+            return Some((key, std::mem::replace(existing, value)));
         }
         let mut removed = None;
         while self.entries.len() >= self.capacity {
             let oldest = self.order.pop_front().expect("cached entries have FIFO keys");
-            removed = self.entries.remove(&oldest);
-            self.evictions += 1;
+            if let Some(value) = self.entries.remove(&oldest) {
+                removed = Some((oldest, value));
+                self.evictions += 1;
+            }
         }
         self.order.push_back(key.clone());
         self.entries.insert(key, value);
         removed
     }
-    fn remove_where(&mut self, mut pred: impl FnMut(&[u64], &V) -> bool) -> Vec<V> {
+    fn remove_key(&mut self, key: &[u64]) -> Option<V> {
+        let value = self.entries.remove(key)?;
+        // Keep FIFO bookkeeping consistent on deletions and ID reuse.
+        self.order.retain(|candidate| candidate.as_slice() != key);
+        Some(value)
+    }
+    fn remove_where(&mut self, mut pred: impl FnMut(&[u64], &V) -> bool) -> Vec<(Vec<u64>, V)> {
         let keys: HashSet<Vec<u64>> = self.entries.iter()
             .filter(|(k, v)| pred(k, v))
             .map(|(k, _)| k.clone())
             .collect();
         if keys.is_empty() { return Vec::new(); }
         self.order.retain(|key| !keys.contains(key));
-        keys.into_iter().filter_map(|key| self.entries.remove(&key)).collect()
+        keys.into_iter().filter_map(|key| self.entries.remove(&key).map(|v| (key, v))).collect()
     }
 }
 #[derive(Clone, Copy)]
@@ -1009,7 +1017,9 @@ pub struct Gpu {
     pending_skips0: u64,
     compute: HashMap<String, Option<(ComputePipeline, BindGroupLayout, u64, Rc<Program>)>>,
     bind_groups: FifoCache<CachedBg>,
-    bg_ref_counts: HashMap<u32, u32>,
+    // Reverse dependency index: only cached bind groups actually referring to
+    // the destroyed object need invalidation.
+    bg_dependents: HashMap<u32, HashSet<Vec<u64>>>,
     ubo_slots: Vec<Vec<Chunk>>,
     ubo_shared: Vec<(Buffer, u64)>,
     ubo_slot: usize,
@@ -1221,7 +1231,7 @@ impl Gpu {
             s: State::new(), pdirty: true, last_pl: None, shader_index, shader_dir, next_uid: 1,
             bgl_cache: HashMap::new(), empty_bgl: None, pipelines: HashMap::new(),
             pipeline_fifo: VecDeque::new(), pipeline_evictions: 0,
-            compute: HashMap::new(), bind_groups: FifoCache::new(BG_LIMIT), bg_ref_counts: HashMap::new(),
+            compute: HashMap::new(), bind_groups: FifoCache::new(BG_LIMIT), bg_dependents: HashMap::new(),
             ubo_slots: (0..FRAME_SLOTS).map(|_| Vec::new()).collect(), ubo_shared: Vec::new(), ubo_slot: 0, ubo_chunk: 0, ubo_off: 0,
             dummy_tex: HashMap::new(), dummy_smp: None, dummy_cmp: None, dummy_bufs: HashMap::new(), zero_vb: None, zero_src: None, scratch: None,
             proxy_pipelines: HashMap::new(), f2d_pipeline: None, blit: None, mip_pipelines: HashMap::new(), mip_sampler: None,
@@ -1634,22 +1644,26 @@ impl Gpu {
             }
         }
     }
-    fn track_cached_bg(&mut self, cached: &CachedBg) {
+    fn track_cached_bg(&mut self, key: &[u64], cached: &CachedBg) {
         for &id in &cached.deps {
-            *self.bg_ref_counts.entry(id).or_insert(0) += 1;
+            self.bg_dependents.entry(id).or_default().insert(key.to_vec());
         }
     }
-    fn untrack_cached_bg(&mut self, cached: &CachedBg) {
+    fn untrack_cached_bg(&mut self, key: &[u64], cached: &CachedBg) {
         for &id in &cached.deps {
-            if let Some(count) = self.bg_ref_counts.get_mut(&id) {
-                if *count > 1 { *count -= 1; } else { self.bg_ref_counts.remove(&id); }
+            if let std::collections::hash_map::Entry::Occupied(mut entry) = self.bg_dependents.entry(id) {
+                entry.get_mut().remove(key);
+                if entry.get().is_empty() { entry.remove(); }
             }
         }
     }
     fn invalidate_cached_bind_groups_for(&mut self, id: u32) {
-        if !self.bg_ref_counts.contains_key(&id) { return; }
-        let removed = self.bind_groups.remove_where(|_, cached| cached.deps.contains(&id));
-        for cached in &removed { self.untrack_cached_bg(cached); }
+        let Some(keys) = self.bg_dependents.remove(&id) else { return };
+        for key in keys {
+            if let Some(cached) = self.bind_groups.remove_key(&key) {
+                self.untrack_cached_bg(&key, &cached);
+            }
+        }
     }
     fn invalidate_shader_caches(&mut self, uid: u64) {
         // Cache keys contain unique program generation IDs, not engine shader
@@ -1673,7 +1687,7 @@ impl Gpu {
         let removed = self.bind_groups.remove_where(|key, _| {
             key.get(1).is_some_and(|program| released_programs.contains(program))
         });
-        for cached in &removed { self.untrack_cached_bg(cached); }
+        for (key, cached) in &removed { self.untrack_cached_bg(key, cached); }
         self.last_pl = None;
         self.pdirty = true;
     }
@@ -2665,10 +2679,10 @@ impl Gpu {
         deps.sort_unstable();
         deps.dedup();
         let cached = CachedBg { bg: bg.clone(), uid, deps };
-        if let Some(old) = self.bind_groups.insert(key, CachedBg {
+        if let Some((old_key, old)) = self.bind_groups.insert(key.clone(), CachedBg {
             bg: cached.bg.clone(), uid: cached.uid, deps: cached.deps.clone(),
-        }) { self.untrack_cached_bg(&old); }
-        self.track_cached_bg(&cached);
+        }) { self.untrack_cached_bg(&old_key, &old); }
+        self.track_cached_bg(&key, &cached);
         Some(BgResult { bg, uid, dyn_off })
     }
 
