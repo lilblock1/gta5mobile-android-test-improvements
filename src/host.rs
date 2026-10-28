@@ -6,7 +6,8 @@ use crate::{
     write_u64, HostState, RT,
 };
 use anyhow::Result;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -30,28 +31,33 @@ static PENDING_MAILBOX: LazyLock<Mutex<HashSet<u64>>> = LazyLock::new(|| Mutex::
 static ANY_PENDING: AtomicU64 = AtomicU64::new(0);
 static STUB_SEQ: AtomicU64 = AtomicU64::new(0);
 
-// Cloth buffer warnings recur thousands of times while streaming. Keep the
-// first message and periodic counts, but avoid writing identical warnings on
-// every engine call. Errors and other messages remain unfiltered.
-struct ClothWarnings {
-    last_print: Option<Instant>,
-    suppressed: u64,
-}
-static CLOTH_WARNINGS: Mutex<ClothWarnings> = Mutex::new(ClothWarnings { last_print: None, suppressed: 0 });
+// Limit repetitive engine warnings (cloth, parser, streaming) without hiding
+// distinct warnings or errors. Bound the table so unique warning strings do
+// not themselves create an unbounded host-memory cache.
+struct WarningCount { last_print: Instant, suppressed: u64 }
+static WARNINGS: LazyLock<Mutex<HashMap<u64, WarningCount>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+const MAX_TRACKED_WARNINGS: usize = 4096;
 
 fn log_engine_line(source: &str, line: &str) {
-    if line.contains("GPU version of buffer not updated!") {
-        let mut state = CLOTH_WARNINGS.lock().unwrap();
+    if line.starts_with("Warning:") {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        line.hash(&mut hasher);
+        let key = hasher.finish();
         let now = Instant::now();
-        if state.last_print.is_some_and(|time| now.duration_since(time) < Duration::from_secs(10)) {
-            state.suppressed += 1;
-            return;
+        let mut warnings = WARNINGS.lock().unwrap();
+        if let Some(state) = warnings.get_mut(&key) {
+            if now.duration_since(state.last_print) < Duration::from_secs(10) {
+                state.suppressed += 1;
+                return;
+            }
+            if state.suppressed != 0 {
+                eprintln!("[{source}] repeated warning suppressed {} times in preceding interval", state.suppressed);
+                state.suppressed = 0;
+            }
+            state.last_print = now;
+        } else if warnings.len() < MAX_TRACKED_WARNINGS {
+            warnings.insert(key, WarningCount { last_print: now, suppressed: 0 });
         }
-        if state.suppressed != 0 {
-            eprintln!("[eng] repeated cloth-buffer warning suppressed {} times in preceding interval", state.suppressed);
-            state.suppressed = 0;
-        }
-        state.last_print = Some(now);
     }
     eprintln!("[{source}] {line}");
 }
