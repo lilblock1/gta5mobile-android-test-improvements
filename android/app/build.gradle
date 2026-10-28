@@ -5,7 +5,9 @@ android {
     compileSdk 36
     ndkVersion '28.2.13676358'
     defaultConfig {
-        applicationId 'dev.muguet'
+        // Keep the test launcher independent from the original dev.muguet app.
+        // Android uses applicationId (not namespace) to decide app identity/data storage.
+        applicationId 'dev.muguet.test'
         minSdk 29
         targetSdk 36
         versionCode 3
