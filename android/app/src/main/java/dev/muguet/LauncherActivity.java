@@ -187,7 +187,8 @@ public final class LauncherActivity extends Activity {
     private Button play, playEngine, importButton, clearFolderButton, grantAccessButton;
     private TextView folderStatus;
     private ProgressBar progress;
-    private Spinner mode, heap;
+    private Spinner mode, heap, streamingBudget;
+    private static final double[] STREAMING_BUDGETS = {0.35, 0.25, 0.15};
     private EditText scale, name, magnetField, relayUrl, relayRoom, relayKey;
     private CheckBox mute, multiplayer, cpuBc, softwareClip;
     private SeekBar sensitivity;
@@ -346,6 +347,10 @@ public final class LauncherActivity extends Activity {
         column.addView(loadMagnetButton);
         mode = choice(column, "Start mode", new String[]{"Story", "Sandbox"}, settings.optInt("start_mode", 2) == 1 ? 0 : 1);
         heap = choice(column, "Maximum game heap (not total app memory)", new String[]{"3 GB", "4 GB", "5 GB", "6 GB", "7 GB", "8 GB"}, Math.max(0, Math.min(5, settings.optInt("android_heap_gb", 5) - 3)));
+        double currentStreaming = settings.optDouble("streamer_percentage", 0.35);
+        int streamingChoice = currentStreaming <= 0.20 ? 2 : currentStreaming <= 0.30 ? 1 : 0;
+        streamingBudget = choice(column, "World streaming memory (lower uses less memory but may cause more asset reloads)",
+            new String[]{"Balanced — 35% (current)", "Memory saver — 25%", "Aggressive — 15% (experimental)"}, streamingChoice);
         // Graphics live here, not in a save file: the web port's graphics_settings.js
         // says "apply after custom args; never edit SGTA saves", and the engine rewrites
         // its own settings.xml on every save.
@@ -456,6 +461,7 @@ public final class LauncherActivity extends Activity {
             settings.put("scale", renderScale);
             settings.put("start_mode", mode.getSelectedItemPosition() + 1);
             settings.put("android_heap_gb", heap.getSelectedItemPosition() + 3);
+            settings.put("streamer_percentage", STREAMING_BUDGETS[streamingBudget.getSelectedItemPosition()]);
             settings.put("texture_quality", settings.optInt("texture_quality", 0));
             settings.put("graphics", graphicsChoices());
             settings.put("extra_args", graphicsArgs());
