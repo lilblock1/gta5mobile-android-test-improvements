@@ -25,6 +25,18 @@ public final class DriverPackages {
             throw new IOException("Invalid driver selection");
         Files.writeString(selection(context).toPath(), name, StandardCharsets.UTF_8);
     }
+    /** Native Vulkan proxy must be present before a custom selection can launch. */
+    public static boolean nativeProxyInstalled(Context context) {
+        File dir = new File(context.getApplicationInfo().nativeLibraryDir);
+        return new File(dir, "libvulkan.so").isFile()
+            && new File(dir, "libmain_hook.so").isFile()
+            && new File(dir, "libhook_impl.so").isFile();
+    }
+    public static String effectiveDriver(Context context) {
+        String requested = selected(context);
+        return requested.startsWith("custom:") && !nativeProxyInstalled(context)
+            ? "system" : requested;
+    }
     public static String importZip(Context context, Uri uri) throws IOException {
         File root = root(context);
         if (!root.isDirectory() && !root.mkdirs()) throw new IOException("Cannot create driver folder");
