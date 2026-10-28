@@ -360,6 +360,21 @@ static jint nativeFps(JNIEnv *env, jobject thiz) {
   return (jint)(PGRenderedFramesPerSecond() * 100.0);
 }
 
+// Both Android game modes display the same lock-free renderer snapshot.
+// This is invoked at 1 Hz by the HUD, not by the 60 Hz input loop.
+static jlongArray nativePerfStats(JNIEnv *env, jobject thiz) {
+  (void)thiz;
+  typedef void (*perf_snapshot_fn)(uint64_t*, size_t);
+  uint64_t snapshot[6] = {0};
+  perf_snapshot_fn read = (perf_snapshot_fn)pg_renderer_symbol("muguet_gpu_perf_snapshot");
+  if (read) read(snapshot, 6);
+  jlong data[6];
+  for (int i = 0; i < 6; ++i) data[i] = (jlong)snapshot[i];
+  jlongArray array = (*env)->NewLongArray(env, 6);
+  if (array) (*env)->SetLongArrayRegion(env, array, 0, 6, data);
+  return array;
+}
+
 // Set the engine heap ceiling (MB) before start. Must be called before PGStartEngine.
 static void nativeSetHeapMb(JNIEnv *env, jobject thiz, jint mb) {
   (void)env; (void)thiz;
@@ -393,6 +408,7 @@ static JNINativeMethod g_methods[] = {
   {"nativeLastInputDevice",   "()I",                                  (void*)nativeLastInputDevice},
   {"nativeTouchContext",      "()I",                                  (void*)nativeTouchContext},
   {"nativeFps",               "()I",                                  (void*)nativeFps},
+  {"nativePerfStats",         "()[J",                                 (void*)nativePerfStats},
 };
 
 // Bind the table above onto the given class (dev.muguet.EngineActivity).
