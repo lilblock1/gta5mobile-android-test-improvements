@@ -952,6 +952,10 @@ pub struct Gpu {
     surface_format: TextureFormat,
     surface_size: (u32, u32),
     objs: Vec<Option<Obj>>,
+    // Lifecycle counters for engine-owned buffers, textures and SRV/UAV views.
+    resource_creates: [u64; 3],
+    resource_destroys: [u64; 3],
+    resource_replacements: u64,
     enc: Option<CommandEncoder>,
     enc_epoch: u64,
     pass: Option<RenderPass<'static>>,
@@ -1176,7 +1180,8 @@ impl Gpu {
         Ok(Gpu {
             instance: instance.clone(), pending_clears: HashMap::new(), clears_folded: 0, pipe_jobs, pipe_results, pipe_pending: HashMap::new(), pending_skips: 0, pending_skips0: 0,
             base, mem, ring, device, queue, adapter, surface, surface_format, surface_size: (0, 0),
-            objs: Vec::new(), enc: None, enc_epoch: 1, pass: None, pass_key: None, pass_info: None, pass_st: PassSt::default(),
+            objs: Vec::new(), resource_creates: [0; 3], resource_destroys: [0; 3], resource_replacements: 0,
+            enc: None, enc_epoch: 1, pass: None, pass_key: None, pass_info: None, pass_st: PassSt::default(),
             s: State::new(), pdirty: true, last_pl: None, shader_index, shader_dir, next_uid: 1,
             bgl_cache: HashMap::new(), empty_bgl: None, pipelines: HashMap::new(), compute: HashMap::new(), bind_groups: FifoCache::new(BG_LIMIT),
             ubo_slots: (0..FRAME_SLOTS).map(|_| Vec::new()).collect(), ubo_shared: Vec::new(), ubo_slot: 0, ubo_chunk: 0, ubo_off: 0,
@@ -1220,6 +1225,19 @@ impl Gpu {
         if i > 64 << 20 {
             log_once("hugeid", &format!("object id {id} out of range: ignored"));
             return;
+        }
+        // An ID can be reused. Do not just drop the previous Rust handle:
+        // use the ordinary destruction path so GPU buffer/texture destruction
+        // and in-flight encoder flushing happen on replacement, too.
+        if self.obj(id).is_some() {
+            self.resource_replacements += 1;
+            self.destroy(id);
+        }
+        match &o {
+            Obj::Buf(_) => self.resource_creates[0] += 1,
+            Obj::Tex(_) => self.resource_creates[1] += 1,
+            Obj::Srv(_) | Obj::Uav(_) => self.resource_creates[2] += 1,
+            _ => {}
         }
         if self.objs.len() <= i {
             self.objs.resize_with(i + 1, || None);
@@ -1557,8 +1575,15 @@ impl Gpu {
         if self.used(id) { self.flush(); }
         if let Some(o) = self.objs.get_mut(id as usize).and_then(|o| o.take()) {
             match o {
-                Obj::Tex(t) => t.tex.destroy(),
-                Obj::Buf(b) => { if let Some(g) = b.gpu { g.destroy(); } }
+                Obj::Tex(t) => {
+                    self.resource_destroys[1] += 1;
+                    t.tex.destroy();
+                }
+                Obj::Buf(b) => {
+                    self.resource_destroys[0] += 1;
+                    if let Some(g) = b.gpu { g.destroy(); }
+                }
+                Obj::Srv(_) | Obj::Uav(_) => self.resource_destroys[2] += 1,
                 _ => {}
             }
         }
@@ -3547,6 +3572,27 @@ impl Gpu {
                     h.bind_groups.num_kept_from_user, h.samplers.num_kept_from_user, h.render_pipelines.num_kept_from_user,
                     self.objs.iter().filter(|o| o.is_some()).count()));
             }
+            // Distinguish still-live engine IDs from GPU handles retained by
+            // wgpu and caches. Created minus destroyed should match live IDs.
+            let mut live = [0u64; 3];
+            let mut live_gpu_buffer_bytes = 0u64;
+            for obj in self.objs.iter().flatten() {
+                match obj {
+                    Obj::Buf(b) => {
+                        live[0] += 1;
+                        live_gpu_buffer_bytes = live_gpu_buffer_bytes.saturating_add(b.bytes);
+                    }
+                    Obj::Tex(_) => live[1] += 1,
+                    Obj::Srv(_) | Obj::Uav(_) => live[2] += 1,
+                    _ => {}
+                }
+            }
+            log(&format!(
+                "gpu lifecycle: created buf/tex/views={}/{}/{}, destroyed={}/{}/{}, live={}/{}/{}, live GPU buffer MiB={}, reused IDs={}",
+                self.resource_creates[0], self.resource_creates[1], self.resource_creates[2],
+                self.resource_destroys[0], self.resource_destroys[1], self.resource_destroys[2],
+                live[0], live[1], live[2], live_gpu_buffer_bytes >> 20, self.resource_replacements,
+            ));
             let (shadow_len, shadow_capacity, shadow_declared) = self.objs.iter().fold((0u64, 0u64, 0u64), |(len, cap, declared), obj| {
                 match obj {
                     Some(Obj::Buf(Buf { size, shadow: Some(shadow), .. })) => (len + shadow.len() as u64, cap + shadow.capacity() as u64, declared + size),
