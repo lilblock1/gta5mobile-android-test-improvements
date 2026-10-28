@@ -2791,7 +2791,10 @@ impl Gpu {
                     let gb = if is_counter {
                         match buf_id { Some((r, _, _)) => self.counter_buffer(r), None => None }.unwrap_or_else(|| self.dummy_buffer(b.binding))
                     } else {
-                        match buf_id.and_then(|(r, a, n)| self.buf(r).and_then(|bo| bo.gpu.clone().map(|g| (g, bo.stride, bo.bytes, a, n)))) {
+                        match buf_id.and_then(|(r, a, n)| {
+                            let g = self.gpu_buffer(r)?;
+                            self.buf(r).map(|bo| (g, bo.stride, bo.bytes, a, n))
+                        }) {
                             Some((g, stride, bytes, first, num)) => {
                                 let stride = if stride == 0 { 4 } else { stride } as u64;
                                 let off = first as u64 * stride;
@@ -3343,7 +3346,8 @@ impl Gpu {
         let Some((res, is_buf, a)) = self.view_obj(id).map(|v| (v.res, v.is_buf, v.a)) else { return };
         let zero = values.iter().all(|&v| v == 0);
         if is_buf {
-            let Some((g, bytes)) = self.buf(res).and_then(|b| b.gpu.clone().map(|g| (g, b.bytes))) else { return };
+            let backed = self.gpu_buffer(res);
+            let Some((g, bytes)) = backed.and_then(|g| self.buf(res).map(|b| (g, b.bytes))) else { return };
             self.end_pass();
             if zero {
                 self.encoder().clear_buffer(&g, 0, None);
