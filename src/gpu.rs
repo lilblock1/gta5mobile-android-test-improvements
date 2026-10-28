@@ -1691,6 +1691,19 @@ impl Gpu {
         let (tex, format, a8, compressed_source) = (t.tex.clone(), t.format, t.a8, t.compressed_source);
         let (w, h) = (w.min((t.desc.w >> mip).max(1).saturating_sub(x)), h.min((t.desc.h >> mip).max(1).saturating_sub(y)));
         if w == 0 || h == 0 { return; }
+        // The common uncompressed path does not transform the payload: pass
+        // the existing engine memory to wgpu instead of allocating and copying
+        // an entire texture upload. BC fallback and A8 conversion still use
+        // their owned buffers because they must rewrite the bytes.
+        if compressed_source.is_none() && !a8 {
+            self.queue.write_texture(
+                TexelCopyTextureInfo { texture: &tex, mip_level: mip, origin: Origin3d { x, y, z: if three { z } else { slice } }, aspect: TextureAspect::All },
+                self.bytes(data_addr, size),
+                TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(bpr), rows_per_image: Some(rows.max(1)) },
+                copy_extent(format, w, h, d.max(1)),
+            );
+            return;
+        }
         let mut data = self.bytes(data_addr, size).to_vec();
         let mut bpr = bpr;
         let mut rows = rows;
