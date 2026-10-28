@@ -205,7 +205,7 @@ public final class LauncherActivity extends Activity {
         scroll.addView(column);
         setContentView(scroll);
         TextView title = new TextView(this);
-        title.setText("Grand V Android");
+        title.setText("Grand V Android Test");
         title.setTextSize(24);
         column.addView(title);
         TextView warning = new TextView(this);
@@ -232,7 +232,7 @@ public final class LauncherActivity extends Activity {
         // data/ and b/<build>/ works just as well, and is used where it lies, so
         // nothing is copied and the phone needs no free space for it.
         Button folderButton = new Button(this);
-        folderButton.setText("Use a game files folder");
+        folderButton.setText("Reuse existing shared game folder (no copy)");
         folderButton.setOnClickListener(v -> {
             Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
@@ -240,6 +240,9 @@ public final class LauncherActivity extends Activity {
             startActivityForResult(intent, PICK_FOLDER);
         });
         column.addView(folderButton);
+        TextView sharingNote = new TextView(this);
+        sharingNote.setText("To reuse the original game's files, both apps must point to an accessible folder in shared storage. Android blocks the Test app from reading the original app's private /data/user/0/dev.muguet/files/game directory. If your original installation is private, the original app must export or relocate the game first. Choosing a shared folder does not copy game data.");
+        column.addView(sharingNote);
         folderStatus = new TextView(this);
         column.addView(folderStatus);
         clearFolderButton = new Button(this);
@@ -256,7 +259,7 @@ public final class LauncherActivity extends Activity {
             try {
                 startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
                     Uri.parse("package:" + getPackageName())));
-            } catch (Exception e) { status.setText("Grant 'All files access' to Grand V Android in Settings > Apps > Special access."); }
+            } catch (Exception e) { status.setText("Grant 'All files access' to Grand V Android Test in Settings > Apps > Special access."); }
         });
         column.addView(grantAccessButton);
         // The engine writes saves into app-private storage (MUGUET_FSROOT), which
@@ -569,23 +572,11 @@ public final class LauncherActivity extends Activity {
         String stored = settings.optString("game_folder_uri", "");
         if (!stored.isEmpty()) {
             Uri tree = Uri.parse(stored);
-            try {
-                getContentResolver().takePersistableUriPermission(tree,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-            } catch (SecurityException ignored) {
-                // The grant was revoked or the pick was never persistable; the check below decides.
-            }
-            try {
-                String id = android.provider.DocumentsContract.getTreeDocumentId(tree);
-                int colon = id.indexOf(':');
-                if (colon >= 0 && "primary".equals(id.substring(0, colon))) {
-                    File base = new File("/storage/emulated/0/" + id.substring(colon + 1));
-                    String root = gameRoot(base.getAbsolutePath());
-                    if (root != null) return root;
-                }
-            } catch (Exception ignored) {
-                // Fall through to the path we resolved earlier.
-            }
+            // Android's document URI is converted to a readable shared-storage
+            // path for the native game process. It cannot grant access to the
+            // private storage of a different application.
+            String root = gameRootFromTree(tree);
+            if (root != null) return root;
         }
         // The tree Uri is gone or no longer granted - a reinstall, a revoked
         // grant, a cancelled pick. The path resolved from it is still readable
@@ -598,6 +589,24 @@ public final class LauncherActivity extends Activity {
         }
         return stored.isEmpty() ? "" : null;
     }
+    // Only a primary shared-storage tree can become a direct filesystem path.
+    // Other providers expose content:// streams, which the native engine cannot
+    // open as ordinary game files; app-private dirs are sandboxed by Android.
+    private String gameRootFromTree(Uri tree) {
+        try {
+            if (!"com.android.externalstorage.documents".equals(tree.getAuthority())) return null;
+            String id = android.provider.DocumentsContract.getTreeDocumentId(tree);
+            if (!id.startsWith("primary:")) return null;
+            String relative = id.substring("primary:".length());
+            File base = new File("/storage/emulated/0/", relative).getCanonicalFile();
+            File sharedRoot = new File("/storage/emulated/0").getCanonicalFile();
+            if (!base.toPath().startsWith(sharedRoot.toPath())) return null;
+            return gameRoot(base.getAbsolutePath());
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
     // The release wraps the game in a folder: GrandV-assets/mirror/playgta5.com
     // holds data/ and b/<build>/, and the instructions tell people to pick the
     // outer folder. So the game folder is looked up inside the picked one.
@@ -899,14 +908,16 @@ public final class LauncherActivity extends Activity {
                 // Without a persisted grant the folder is readable for this one
                 // launch only, so the picker would have to be used every time.
                 getContentResolver().takePersistableUriPermission(tree, keep);
-                String path = folderPath();
+                // Check the NEW selection, not folderPath(), which still
+                // points at the previously saved folder until settings change.
+                String path = gameRootFromTree(tree);
                 if (path == null) {
-                    status.setText("No game data in that folder. Pick the folder that holds the game - the app looks inside it, so GrandV-assets works.");
+                    status.setText("Cannot read GTA files in the selected folder. Choose a shared-storage folder holding data/ and b/, or grant file access. Android does not allow access to the original app's private installed game.");
                     return;
                 }
                 settings.put("game_folder_uri", tree.toString());
-                // The game runs in its own process, which cannot see anything the
-                // launcher passes it, so the resolved path is what it reads.
+                // The game process reads a filesystem path from config.json;
+                // no copying of game data is done for shared folders.
                 settings.put("game_folder_path", path);
                 saveSettings();
                 ready();
