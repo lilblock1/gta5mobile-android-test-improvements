@@ -1104,6 +1104,9 @@ pub struct Gpu {
     eviction_last_scan_frame: u64,
     eviction_pending: VecDeque<u32>,
     hud_last_sample: Instant,
+    // Android-only low-CPU frame pacing for launcher FPS values (24/30/42).
+    frame_pace: Option<Duration>,
+    frame_due: Option<Instant>,
     enc: Option<CommandEncoder>,
     enc_epoch: u64,
     pass: Option<RenderPass<'static>>,
@@ -1324,6 +1327,15 @@ impl Gpu {
         let shader_index: HashMap<String, serde_json::Value> = serde_json::from_str(&index_text).unwrap_or_default();
         log(&format!("shader index: {} entries from {}", shader_index.len(), shader_dir.display()));
 
+        let frame_pace = if cfg!(target_os = "android") {
+            std::env::var("MUGUET_RENDER_FPS_LIMIT").ok()
+                .and_then(|s| s.parse::<u32>().ok())
+                .filter(|&n| (1..60).contains(&n))
+                .map(|fps| {
+                    log(&format!("host frame pacing enabled: target {fps} FPS (sleeping, not busy-waiting)"));
+                    Duration::from_secs_f64(1.0 / fps as f64)
+                })
+        } else { None };
         let (res_tx, pipe_results) = std::sync::mpsc::channel::<(u64, Option<RenderPipeline>)>();
         let pipe_jobs = {
             let (job_tx, job_rx) = std::sync::mpsc::channel::<(u64, PipeJob)>();
@@ -1347,6 +1359,7 @@ impl Gpu {
             deferred_buffer_allocations: 0, restore_data_bytes: 0,
             evicted_buffers: 0, restored_buffers: 0, eviction_last_scan_frame: 0,
             eviction_pending: VecDeque::new(), hud_last_sample: Instant::now(),
+            frame_pace, frame_due: None,
             enc: None, enc_epoch: 1, pass: None, pass_key: None, pass_info: None, pass_st: PassSt::default(),
             s: State::new(), pdirty: true, last_pl: None, shader_index, shader_dir, next_uid: 1,
             bgl_cache: HashMap::new(), empty_bgl: None, pipelines: HashMap::new(),
@@ -4087,6 +4100,22 @@ impl Gpu {
             self.frame_wait_max_ns = self.frame_wait_max_ns.max(elapsed);
         }
         self.process_maps(false);
+        self.pace_frame();
+    }
+
+    // Limit the renderer's production rate without polling GPU state or
+    // burning a CPU core. If GPU work takes longer than the frame budget,
+    // resynchronize rather than trying to "catch up" with burst frames.
+    fn pace_frame(&mut self) {
+        let Some(period) = self.frame_pace else { return };
+        let now = Instant::now();
+        let deadline = self.frame_due.unwrap_or(now);
+        if deadline > now {
+            std::thread::sleep(deadline - now);
+        }
+        let actual = Instant::now();
+        let next = deadline.checked_add(period).unwrap_or(actual + period);
+        self.frame_due = Some(if next < actual { actual + period } else { next });
     }
 
     fn log_fps(&mut self) {
