@@ -77,6 +77,10 @@ public final class EngineActivity extends Activity {
     private String statusMessage = "Starting engine…";
 
     @Override public void onCreate(Bundle state) {
+        // Initialize the Vulkan proxy in this process before native rendering.
+        if (!DriverBridge.prepare(this)) {
+            android.util.Log.e("MuguetDriver", DriverBridge.status());
+        }
         super.onCreate(state);
         thermalStatus = new ThermalStatus(this);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
