@@ -703,6 +703,11 @@ struct Buf {
     // Some only for eligible vertex/index buffers whose physical allocation
     // can be postponed until the first upload, copy, draw or readback.
     deferred_usage: Option<BufferUsages>,
+    // Only single-purpose vertex/index buffers can be dropped and recreated.
+    restore_usage: Option<BufferUsages>,
+    restore_zero: bool,
+    // Bounded CPU copy for small buffers; keeps all updates intact on reload.
+    restore_data: Option<Vec<u8>>,
     shadow: Option<Vec<u8>>,
     version: u64,
     enc: u64,
@@ -714,6 +719,19 @@ struct Buf {
 
 // Restrict deferral to single-purpose vertex/index buffers. Complex bind flags
 // and misc usage (including indirect/UAV storage) retain eager allocation.
+const GPU_BUFFER_SOFT_LIMIT: u64 = 45_000;
+const GPU_BUFFER_SWEEP_GOAL: usize = 10_000;
+const GPU_EVICT_PER_FRAME: usize = 128;
+const GPU_EVICT_COLD_FRAMES: u64 = 600;
+const GPU_RESTORE_BUFFER_MAX: u64 = 16 * 1024;
+const GPU_RESTORE_BUDGET: u64 = 96 * 1024 * 1024;
+
+// Being old is not sufficient: eviction requires an unmodified zero buffer
+// or a complete and current CPU copy of its contents.
+fn can_restore_buffer(restore_usage: bool, restore_zero: bool, restored_data: bool) -> bool {
+    restore_usage && (restore_zero || restored_data)
+}
+
 fn lazy_vertex_index_buffer(bind: u32, misc: u32) -> bool {
     misc == 0 && bind & 3 != 0 && bind & !3 == 0
 }
@@ -1078,6 +1096,11 @@ pub struct Gpu {
     live_gpu_buffer_bytes: u64,
     live_gpu_buffer_count: u64,
     deferred_buffer_allocations: u64,
+    restore_data_bytes: u64,
+    evicted_buffers: u64,
+    restored_buffers: u64,
+    eviction_last_scan_frame: u64,
+    eviction_pending: VecDeque<u32>,
     hud_last_sample: Instant,
     enc: Option<CommandEncoder>,
     enc_epoch: u64,
@@ -1319,7 +1342,9 @@ impl Gpu {
             base, mem, ring, device, queue, adapter, surface, surface_format, surface_size: (0, 0),
             objs: Vec::new(), resource_creates: [0; 3], resource_destroys: [0; 3],
             resource_replacements: 0, live_gpu_buffer_bytes: 0, live_gpu_buffer_count: 0,
-            deferred_buffer_allocations: 0, hud_last_sample: Instant::now(),
+            deferred_buffer_allocations: 0, restore_data_bytes: 0,
+            evicted_buffers: 0, restored_buffers: 0, eviction_last_scan_frame: 0,
+            eviction_pending: VecDeque::new(), hud_last_sample: Instant::now(),
             enc: None, enc_epoch: 1, pass: None, pass_key: None, pass_info: None, pass_st: PassSt::default(),
             s: State::new(), pdirty: true, last_pl: None, shader_index, shader_dir, next_uid: 1,
             bgl_cache: HashMap::new(), empty_bgl: None, pipelines: HashMap::new(),
@@ -1419,13 +1444,60 @@ impl Gpu {
         let gpu = self.device.create_buffer(&BufferDescriptor {
             label: None, size: bytes, usage, mapped_at_creation: false,
         });
+        // Restore the exact contents before allowing a previously evicted
+        // guest-owned buffer to be drawn, read back or copied.
+        let had_restore = self.buf(id).is_some_and(|b| b.restore_data.is_some());
+        if let Some(data) = self.buf(id).and_then(|b| b.restore_data.as_deref()) {
+            self.queue.write_buffer(&gpu, 0, data);
+        }
         let b = self.buf_mut(id)?;
         b.gpu = Some(gpu.clone());
         b.deferred_usage = None;
         self.live_gpu_buffer_bytes = self.live_gpu_buffer_bytes.saturating_add(bytes);
         self.live_gpu_buffer_count += 1;
         self.deferred_buffer_allocations += 1;
+        if had_restore { self.restored_buffers += 1; }
         Some(gpu)
+    }
+    fn record_buffer_upload(&mut self, id: u32, offset: u64, data: &[u8]) {
+        let Some(b) = self.buf(id) else { return };
+        if b.restore_usage.is_none() || data.is_empty() { return; }
+        let len = b.bytes;
+        let end = offset.saturating_add(data.len() as u64);
+        if end > len {
+            // Invalid write bounds: never claim that the CPU mirror is safe.
+            self.discard_buffer_backup(id);
+            return;
+        }
+        if b.restore_data.is_none() {
+            if !b.restore_zero { return; }
+            if len > GPU_RESTORE_BUFFER_MAX || self.restore_data_bytes.saturating_add(len) > GPU_RESTORE_BUDGET {
+                if let Some(b) = self.buf_mut(id) { b.restore_zero = false; }
+                return;
+            }
+            let Ok(capacity) = usize::try_from(len) else { return };
+            let mut data_copy = Vec::new();
+            if data_copy.try_reserve_exact(capacity).is_err() {
+                if let Some(b) = self.buf_mut(id) { b.restore_zero = false; }
+                return;
+            }
+            data_copy.resize(capacity, 0);
+            self.buf_mut(id).unwrap().restore_data = Some(data_copy);
+            self.restore_data_bytes += len;
+        }
+        if let Some(backup) = self.buf_mut(id).and_then(|b| b.restore_data.as_mut()) {
+            let start = offset as usize;
+            backup[start..start + data.len()].copy_from_slice(data);
+        }
+        if let Some(b) = self.buf_mut(id) { b.restore_zero = false; }
+    }
+    fn discard_buffer_backup(&mut self, id: u32) {
+        if let Some(b) = self.buf_mut(id) {
+            b.restore_zero = false;
+            if let Some(data) = b.restore_data.take() {
+                self.restore_data_bytes = self.restore_data_bytes.saturating_sub(data.len() as u64);
+            }
+        }
     }
     fn view_obj(&self, id: u32) -> Option<&ViewObj> {
         match self.obj(id) { Some(Obj::Srv(v)) | Some(Obj::Uav(v)) => Some(v), _ => None }
@@ -1776,6 +1848,9 @@ impl Gpu {
                 }
                 Obj::Buf(b) => {
                     self.resource_destroys[0] += 1;
+                    if let Some(data) = &b.restore_data {
+                        self.restore_data_bytes = self.restore_data_bytes.saturating_sub(data.len() as u64);
+                    }
                     if b.gpu.is_some() {
                         self.live_gpu_buffer_bytes = self.live_gpu_buffer_bytes.saturating_sub(b.bytes);
                         self.live_gpu_buffer_count = self.live_gpu_buffer_count.saturating_sub(1);
@@ -1911,7 +1986,8 @@ impl Gpu {
         // The shadow of a constant buffer holds only what the engine uploaded.
         // Allocating the full buffer size upfront costs host memory for every
         // constant buffer the engine creates, and it never shrinks.
-        let mut b = Buf { size, stride, gpu: None, bytes: 0, deferred_usage: None,
+        let mut b = Buf { size, stride, gpu: None, bytes: 0,
+            deferred_usage: None, restore_usage: None, restore_zero: false, restore_data: None,
             shadow: None, version: 0, enc: 0, in_bg: false,
             born_frame: self.presents, last_used_frame: None, counter: None };
         if bind & 4 != 0 { b.shadow = Some(Vec::new()); }
@@ -1924,6 +2000,8 @@ impl Gpu {
             b.bytes = ((size + 3) & !3).max(4);
             if lazy_vertex_index_buffer(bind, misc) {
                 b.deferred_usage = Some(usage);
+                b.restore_usage = Some(usage);
+                b.restore_zero = true;
             } else {
                 b.gpu = Some(self.device.create_buffer(&BufferDescriptor { label: None, size: b.bytes, usage, mapped_at_creation: false }));
             }
@@ -1944,6 +2022,7 @@ impl Gpu {
         // yet been bound to a draw. Previously these were falsely classified
         // as "never used" and cold after 600 frames.
         if size > 0 { b.last_used_frame = Some(frame); }
+        self.record_buffer_upload(id, offset, &data);
         let Some(g) = self.gpu_buffer(id) else { return };
         if !no_overwrite && used { self.flush(); }
         let n = size & !3;
@@ -4182,6 +4261,7 @@ mod tests {
 
     fn shadow_buffer(size: u64) -> Buf {
         Buf { size, stride: 0, gpu: None, bytes: 0, deferred_usage: None,
+            restore_usage: None, restore_zero: false, restore_data: None,
             shadow: Some(Vec::new()), version: 0, enc: 0, in_bg: false,
             born_frame: 0, last_used_frame: None, counter: None }
     }
