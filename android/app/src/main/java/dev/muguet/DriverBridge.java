@@ -47,9 +47,11 @@ public final class DriverBridge {
                 throw new IllegalArgumentException("Driver library is missing");
             String nativeDir = context.getApplicationInfo().nativeLibraryDir;
             System.load(new File(nativeDir, "libvulkan.so").getAbsolutePath());
-            report = nativeInit(nativeDir, dir.getAbsolutePath(), library, true, false);
+            report = nativeInit(nativeDir, dir.getAbsolutePath(), library, true, true);
             JSONObject result = new JSONObject(report);
-            initialized = result.optBoolean("ok", false) && "turnip".equals(result.optString("mode"));
+            initialized = result.optBoolean("ok", false);
+            if (initialized && !"turnip".equals(result.optString("mode")))
+                Log.w(TAG, "Custom driver rejected; native Vulkan proxy is using the stock driver: " + report);
             Log.i(TAG, report);
             return initialized;
         } catch (Throwable error) {
