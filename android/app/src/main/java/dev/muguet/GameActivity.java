@@ -25,6 +25,7 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
     static native boolean nativeInVehicle();
     static native boolean nativeHasFrame();
     static native long nativePresents();
+    static native long[] nativePerfStats();
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final HashSet<Integer> padKeys = new HashSet<>();
     private final HashSet<String> keyboardKeys = new HashSet<>();
@@ -35,7 +36,7 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
     private float lx, ly, rx, ry, lt, rt, hx, hy;
     private long lastTick;
     private String statusMessage = "Loading…";
-    private long fpsAt, fpsFrames;
+    private long fpsAt, fpsFrames, skippedAt;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -50,6 +51,10 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
         fpsText = new TextView(this);
         fpsText.setTextColor(0xccffffff); fpsText.setTextSize(12); fpsText.setPadding(8, 8, 8, 8);
         fpsText.setShadowLayer(4, 0, 0, 0xff000000);
+        fpsText.setTextSize(11);
+        fpsText.setMaxLines(2);
+        fpsText.setGravity(Gravity.CENTER_HORIZONTAL);
+        fpsText.setText("FPS  |  GPU statistics loading…");
         devices = new InputManagerCompat(this, this);
         // The native Vulkan surface owns the activity window, so HUD views added to
         // the content view sit below it. A panel sub-window composites above the
@@ -295,14 +300,24 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
         }
     };
 
-    // Sampled from the native present counter so the readout reflects real frames.
+    // FPS plus GPU statistics sampled at 1 Hz. The 60 Hz input loop only does
+    // a clock comparison; JNI, text layout, and formatting run once per second.
     private void updateFps(long now) {
-        long presents = nativePresents();
-        if (fpsAt == 0) { fpsAt = now; fpsFrames = presents; return; }
-        long elapsed = now - fpsAt;
-        if (elapsed < 500_000_000L) return;
-        float fps = (presents - fpsFrames) * 1e9f / elapsed;
-        fpsAt = now; fpsFrames = presents;
-        if (fpsText != null) fpsText.setText(String.format(java.util.Locale.ROOT, "%.0f FPS", fps));
+        if (fpsAt != 0 && now - fpsAt < 1_000_000_000L) return;
+        long[] stats = nativePerfStats();
+        if (stats == null || stats.length < PerformanceHud.STATS_COUNT) return;
+        if (fpsAt == 0) {
+            fpsAt = now;
+            fpsFrames = stats[0];
+            skippedAt = stats[5];
+            return;
+        }
+        double seconds = (now - fpsAt) / 1e9;
+        float fps = (float) Math.max(0, stats[0] - fpsFrames) / (float) seconds;
+        long skipped = Math.max(0, stats[5] - skippedAt);
+        fpsAt = now;
+        fpsFrames = stats[0];
+        skippedAt = stats[5];
+        if (fpsText != null) fpsText.setText(PerformanceHud.format(fps, stats, skipped, seconds));
     }
 }
