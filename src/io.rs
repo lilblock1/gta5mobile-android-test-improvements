@@ -49,7 +49,12 @@ pub fn start(mem: &SharedMemory, table: u64) {
 fn serve_loop(mem: SharedMemory, table: u64) {
     let files = manifest_files();
     let root = data_dir();
-    let mut handles: HashMap<i32, File> = HashMap::new();
+    // Keep the most recently read files open. Eviction scans only happen
+    // when the cache is full, never on the common streaming-read path.
+    let mut handles: HashMap<i32, (File, u64)> = HashMap::new();
+    let mut access_clock: u64 = 0;
+    let mut opened: u64 = 0;
+    let mut evictions: u64 = 0;
     let mut served: u64 = 0;
     let mut bytes: u64 = 0;
     loop {
@@ -74,22 +79,29 @@ fn serve_loop(mem: SharedMemory, table: u64) {
                         len = len.min(size - off);
 
                         if !handles.contains_key(&id) {
-                            // ponytail: single arbitrary eviction, not LRU; upgrade when streaming churn shows.
+                            // LRU eviction instead of an arbitrary HashMap key.
+                            // This avoids reopening frequently streamed files
+                            // during high file-count asset loading.
                             if handles.len() >= MAX_OPEN {
-                                if let Some(old) = handles.keys().next().copied() { handles.remove(&old); }
+                                if let Some(old) = handles.iter().min_by_key(|(_, (_, stamp))| *stamp).map(|(id, _)| *id) {
+                                    handles.remove(&old);
+                                    evictions += 1;
+                                }
                             }
                             match File::open(root.join(path)) {
-                                Ok(f) => { handles.insert(id, f); }
+                                Ok(f) => { handles.insert(id, (f, access_clock)); opened += 1; }
                                 Err(e) => eprintln!("[io] open {path}: {e}"),
                             }
                         }
                         let (base, mlen) = mem_base_len(&mem);
-                        let Some(f) = handles.get(&id) else {
+                        let Some((f, last_used)) = handles.get_mut(&id) else {
                             atomic_i32(&mem, w + 28).store(-1, Ordering::SeqCst);
                             atomic_i32(&mem, w).store(2, Ordering::SeqCst);
                             let _ = mem.atomic_notify(w, 1);
                             continue;
                         };
+                        access_clock = access_clock.wrapping_add(1);
+                        *last_used = access_clock;
                         if (dst + len) as usize > mlen {
                             -1
                         } else {
@@ -105,7 +117,7 @@ fn serve_loop(mem: SharedMemory, table: u64) {
             served += 1;
             if result > 0 { bytes += result as u64; }
             if served % 2000 == 0 {
-                eprintln!("[io] {served} reads, {} MB", bytes >> 20);
+                eprintln!("[io] {served} reads, {} MB, {} open handles, {} opens, {} evictions", bytes >> 20, handles.len(), opened, evictions);
             }
             atomic_i32(&mem, w + 28).store(result as i32, Ordering::SeqCst);
             atomic_i32(&mem, w).store(2, Ordering::SeqCst);
