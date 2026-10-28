@@ -1,0 +1,39 @@
+name: Experimental Vulkan driver proxy
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'android/driver-proxy/**'
+      - '.github/workflows/driver-proxy.yml'
+
+jobs:
+  proxy-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Android NDK
+        run: |
+          yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --install "ndk;28.2.13676358"
+      - name: Configure proxy
+        run: |
+          cmake -S android/driver-proxy -B build/driver-proxy \
+            -DCMAKE_TOOLCHAIN_FILE="${ANDROID_HOME}/ndk/28.2.13676358/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 \
+            -DCMAKE_BUILD_TYPE=Release
+      - name: Compile proxy and hooks
+        run: cmake --build build/driver-proxy --parallel 4
+      - name: Check required native libraries
+        run: |
+          find build/driver-proxy -name '*.so' -print
+          for name in libvulkan.so libmain_hook.so libhook_impl.so; do
+            test -n "$(find build/driver-proxy -name "$name" -print -quit)" || exit 1
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: muguet-vulkan-proxy-arm64-experimental
+          path: |
+            build/driver-proxy/**/libvulkan.so
+            build/driver-proxy/**/libmain_hook.so
+            build/driver-proxy/**/libhook_impl.so
+          if-no-files-found: error
