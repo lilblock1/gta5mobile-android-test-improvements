@@ -11,8 +11,13 @@ final class PerformanceHud {
     private PerformanceHud() {}
 
     static String format(float fps, long[] data, long skippedInWindow, double seconds) {
+        return format(fps, data, skippedInWindow, seconds, "Unknown");
+    }
+
+    static String format(float fps, long[] data, long skippedInWindow, double seconds, String thermal) {
+        String thermalLabel = thermal == null || thermal.isEmpty() ? "Unknown" : thermal;
         if (data == null || data.length < STATS_COUNT) {
-            return String.format(Locale.ROOT, "%.0f FPS", Math.max(0f, fps));
+            return String.format(Locale.ROOT, "%.0f FPS  |  Thermal %s", Math.max(0f, fps), thermalLabel);
         }
         // Frame time is the 1-second average implied by presented FPS; it is
         // NOT a GPU timer query or a 1% low measurement.
@@ -20,8 +25,8 @@ final class PerformanceHud {
         long mb = data[1] / MIB; // live engine-owned GPU buffer bytes; NOT total VRAM
         double skipsPerSecond = seconds > 0 ? Math.max(0, skippedInWindow) / seconds : 0;
         return String.format(Locale.ROOT,
-            "%.0f FPS  |  %s ms  |  GPU buf %d MB  |  B %s  T %s  |  Shader %d  |  Skip %.0f/s",
-            Math.max(0f, fps), frameMs, mb, compact(data[2]), compact(data[3]),
+            "%.0f FPS  |  Thermal %s  |  %s ms  |  GPU buf %d MB\nB %s  T %s  |  Shader %d  |  Skip %.0f/s",
+            Math.max(0f, fps), thermalLabel, frameMs, mb, compact(data[2]), compact(data[3]),
             Math.max(0, data[4]), skipsPerSecond);
     }
 
