@@ -660,6 +660,8 @@ struct Tex {
     a8: bool,
     enc: u64,
     in_bg: bool,
+    born_frame: u64,
+    last_used_frame: Option<u64>,
     proxy_depth: Option<Proxy>,
     proxy_stencil: Option<Proxy>,
     proxy_fdepth: Option<Proxy>,
@@ -675,6 +677,8 @@ struct Buf {
     version: u64,
     enc: u64,
     in_bg: bool,
+    born_frame: u64,
+    last_used_frame: Option<u64>,
     counter: Option<Buffer>,
 }
 
@@ -1363,11 +1367,19 @@ impl Gpu {
     }
     fn use_tex(&mut self, id: u32) {
         let e = self.enc_epoch;
-        if let Some(t) = self.tex_mut(id) { t.enc = e; }
+        let frame = self.presents;
+        if let Some(t) = self.tex_mut(id) {
+            t.enc = e;
+            t.last_used_frame = Some(frame);
+        }
     }
     fn use_buf(&mut self, id: u32) {
         let e = self.enc_epoch;
-        if let Some(b) = self.buf_mut(id) { b.enc = e; }
+        let frame = self.presents;
+        if let Some(b) = self.buf_mut(id) {
+            b.enc = e;
+            b.last_used_frame = Some(frame);
+        }
     }
     fn used(&self, id: u32) -> bool {
         match self.obj(id) {
@@ -1684,11 +1696,18 @@ impl Gpu {
             match o {
                 Obj::Tex(t) => {
                     self.resource_destroys[1] += 1;
+                    // A view object can outlive its parent texture in the
+                    // guest. Clear its cached native TextureViews now: keeping
+                    // them would also keep the destroyed texture allocation
+                    // referenced in wgpu even after its primary handle drops.
+                    self.invalidate_views_of_resource(id);
                     t.tex.destroy();
                 }
                 Obj::Buf(b) => {
                     self.resource_destroys[0] += 1;
+                    self.invalidate_views_of_resource(id);
                     if let Some(g) = b.gpu { g.destroy(); }
+                    if let Some(counter) = b.counter { counter.destroy(); }
                 }
                 Obj::Srv(_) | Obj::Uav(_) => self.resource_destroys[2] += 1,
                 Obj::Shader(shader) => {
@@ -1696,6 +1715,16 @@ impl Gpu {
                         self.invalidate_shader_caches(prog.uid);
                     }
                 }
+                _ => {}
+            }
+        }
+    }
+    fn invalidate_views_of_resource(&mut self, resource: u32) {
+        // The guest still owns its view IDs, so do not free those IDs.
+        // Only discard native handles tied to the released parent resource.
+        for obj in &mut self.objs {
+            match obj {
+                Some(Obj::Srv(view)) | Some(Obj::Uav(view)) if view.res == resource => view.views.clear(),
                 _ => {}
             }
         }
@@ -1790,8 +1819,9 @@ impl Gpu {
         let tex = match self.scoped(&format!("createTexture id={id} dim={dim} {}x{}x{} mips={mips} dxgi={dxgi} bind=0x{bind:x} samples={samples} -> {:?} usage {:?}", size.width, size.height, size.depth_or_array_layers, m.format, usage), |d| d.create_texture(&desc)) { Some(t) => t, None => return };
         self.set_obj(id, Obj::Tex(Tex {
             tex, desc: TexDesc { w: size.width, h: size.height, d: size.depth_or_array_layers, mips: mips.max(1), samples, dim: dimension },
-            format: m.format, compressed_source, views: HashMap::new(), a8: m.a8, enc: 0, in_bg: false, proxy_depth: None, proxy_stencil: None,
-            proxy_fdepth: None, blit_bg: None, mip_passes: None,
+            format: m.format, compressed_source, views: HashMap::new(), a8: m.a8, enc: 0, in_bg: false,
+            born_frame: self.presents, last_used_frame: None,
+            proxy_depth: None, proxy_stencil: None, proxy_fdepth: None, blit_bg: None, mip_passes: None,
         }));
     }
 
@@ -1800,7 +1830,8 @@ impl Gpu {
         // The shadow of a constant buffer holds only what the engine uploaded.
         // Allocating the full buffer size upfront costs host memory for every
         // constant buffer the engine creates, and it never shrinks.
-        let mut b = Buf { size, stride, gpu: None, bytes: 0, shadow: None, version: 0, enc: 0, in_bg: false, counter: None };
+        let mut b = Buf { size, stride, gpu: None, bytes: 0, shadow: None, version: 0, enc: 0, in_bg: false,
+            born_frame: self.presents, last_used_frame: None, counter: None };
         if bind & 4 != 0 { b.shadow = Some(Vec::new()); }
         let mut usage = BufferUsages::COPY_DST | BufferUsages::COPY_SRC;
         if bind & 1 != 0 { usage |= BufferUsages::VERTEX; }
@@ -3839,6 +3870,28 @@ impl Gpu {
                 self.resource_destroys[0], self.resource_destroys[1], self.resource_destroys[2],
                 live[0], live[1], live[2], live_gpu_buffer_bytes >> 20, self.resource_replacements,
             ));
+            // Report idle GPU allocations without deleting guest-owned
+            // resources: residency can only be reclaimed safely after the
+            // engine unbinds/releases an object or supplies data to restore it.
+            let mut never = [0u64; 2];
+            let mut cold = [0u64; 2];
+            let mut cold_gpu_buffer_bytes = 0u64;
+            for obj in self.objs.iter().flatten() {
+                let (kind, born, used, bytes) = match obj {
+                    Obj::Buf(b) => (0, b.born_frame, b.last_used_frame, b.bytes),
+                    Obj::Tex(t) => (1, t.born_frame, t.last_used_frame, 0),
+                    _ => continue,
+                };
+                if used.is_none() { never[kind] += 1; }
+                if resource_cold(self.presents, born, used, 600) {
+                    cold[kind] += 1;
+                    if kind == 0 { cold_gpu_buffer_bytes += bytes; }
+                }
+            }
+            log(&format!(
+                "gpu residency: buffers never used {} cold(600 frames) {} ({} MiB), textures never used {} cold(600 frames) {}; guest-owned objects are NOT automatically evicted",
+                never[0], cold[0], cold_gpu_buffer_bytes >> 20, never[1], cold[1]
+            ));
             let (shadow_len, shadow_capacity, shadow_declared) = self.objs.iter().fold((0u64, 0u64, 0u64), |(len, cap, declared), obj| {
                 match obj {
                     Some(Obj::Buf(Buf { size, shadow: Some(shadow), .. })) => (len + shadow.len() as u64, cap + shadow.capacity() as u64, declared + size),
@@ -3959,9 +4012,24 @@ fn driver_needs_software_clip(name: &str, driver: &str, driver_info: &str) -> bo
     format!("{name} {driver} {driver_info}").to_lowercase().contains("adreno")
 }
 
+// Resource ages are measured in presented frames, not wall time. A resource
+// created recently is not considered cold just because it was never bound.
+fn resource_cold(frame: u64, born: u64, last_used: Option<u64>, threshold: u64) -> bool {
+    frame.saturating_sub(last_used.unwrap_or(born)) >= threshold
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resource_age_classification_never_reclaims_live_gpu_state() {
+        assert!(!resource_cold(100, 80, None, 600));
+        assert!(resource_cold(700, 80, None, 600));
+        assert!(!resource_cold(700, 80, Some(650), 600));
+        assert!(resource_cold(1300, 80, Some(650), 600));
+        assert!(!resource_cold(1, 80, None, 600));
+    }
 
     #[test]
     fn combined_scope_wait_polls_all_futures_before_finishing() {
@@ -3981,7 +4049,8 @@ mod tests {
     }
 
     fn shadow_buffer(size: u64) -> Buf {
-        Buf { size, stride: 0, gpu: None, bytes: 0, shadow: Some(Vec::new()), version: 0, enc: 0, in_bg: false, counter: None }
+        Buf { size, stride: 0, gpu: None, bytes: 0, shadow: Some(Vec::new()), version: 0, enc: 0, in_bg: false,
+            born_frame: 0, last_used_frame: None, counter: None }
     }
 
     #[test]
