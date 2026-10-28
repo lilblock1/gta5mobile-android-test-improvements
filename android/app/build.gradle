@@ -18,7 +18,7 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
-    packaging { jniLibs { useLegacyPackaging = false } }
+    packaging { jniLibs { useLegacyPackaging = project.hasProperty('withDriverProxy') && project.property('withDriverProxy').toString().toBoolean() } }
     // CI hands over the keystore through ANDROID_KEYSTORE_PATH so every published
     // APK carries one signature and installs over the previous one. Without the
     // secret (any local build) Gradle keeps using its own debug keystore.
@@ -82,3 +82,33 @@ tasks.register('buildRust', Exec) {
     outputs.file('src/main/jniLibs/arm64-v8a/libmuguet.so')
 }
 tasks.named('preBuild').configure { dependsOn 'buildRust' }
+
+// Experimental native Vulkan proxy is opt-in: -PwithDriverProxy=true.
+// The proxy is built independently of the generated wasm2c engine.
+if (project.hasProperty('withDriverProxy') && project.property('withDriverProxy').toString().toBoolean()) {
+    def ndkDir = new File(android.sdkDirectory, "ndk/${android.ndkVersion}")
+    def proxyBuildDir = file("${buildDir}/driver-proxy")
+    tasks.register('configureDriverProxy', Exec) {
+        commandLine 'cmake', '-S', file('../driver-proxy').absolutePath,
+            '-B', proxyBuildDir.absolutePath,
+            '-DCMAKE_TOOLCHAIN_FILE=' + new File(ndkDir, 'build/cmake/android.toolchain.cmake').absolutePath,
+            '-DANDROID_ABI=arm64-v8a', '-DANDROID_PLATFORM=android-29',
+            '-DCMAKE_BUILD_TYPE=Release'
+    }
+    tasks.register('compileDriverProxy', Exec) {
+        dependsOn 'configureDriverProxy'
+        commandLine 'cmake', '--build', proxyBuildDir.absolutePath, '--parallel', '4'
+    }
+    tasks.register('packageDriverProxy', Copy) {
+        dependsOn 'compileDriverProxy'
+        from(fileTree(proxyBuildDir) { include '**/libvulkan.so', '**/libmain_hook.so', '**/libhook_impl.so' })
+        into file('src/main/jniLibs/arm64-v8a')
+        doLast {
+            ['libvulkan.so', 'libmain_hook.so', 'libhook_impl.so'].each { name ->
+                if (!new File(destinationDir, name).isFile())
+                    throw new GradleException("Driver proxy dependency missing: " + name)
+            }
+        }
+    }
+    tasks.named('preBuild').configure { dependsOn 'packageDriverProxy' }
+}
