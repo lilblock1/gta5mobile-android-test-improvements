@@ -1303,6 +1303,7 @@ impl Gpu {
             }));
         }
         log(&format!("device ready: {} ({:?}), driver {} {}, features {:?}", info.name, info.backend, info.driver, info.driver_info, features));
+        log(&driver_support_report(&info.name, &info.driver, &info.driver_info));
         if software_clip {
             log(&format!("clip distances: software emulation ({})", if adreno { "Adreno driver" } else { "requested" }));
         } else {
@@ -4671,4 +4672,11 @@ struct VSOut {
         assert!(!driver_needs_software_clip("Mali-G68 MC4 (Vulkan)", "ARM", ""));
         assert!(!driver_needs_software_clip("Apple M3 (Metal)", "Apple", ""));
     }
+}
+
+/// Driver capability report. Android selects the Vulkan ICD before wgpu starts;
+/// loading arbitrary replacement drivers inside the renderer is unsafe.
+fn driver_support_report(gpu: &str, driver: &str, version: &str) -> String {
+    let is_adreno = gpu.to_ascii_lowercase().contains("adreno");
+    format!("driver support: Vulkan backend; GPU={gpu}; driver={driver}; version={version}; external driver selection=Android OS/authorized driver manager; Adreno software clip workaround={}", if is_adreno { "eligible" } else { "not required by GPU name" })
 }
