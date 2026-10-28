@@ -39,6 +39,29 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
     private String statusMessage = "Loading…";
     private long fpsAt, fpsFrames, skippedAt;
 
+    // Respond to Android memory pressure without touching game files or forcing GC.
+    // The Rust renderer owns Vulkan allocations; Android cannot safely evict them.
+    private long lastMemoryWarningAt;
+    @Override public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        if (level < android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW
+                && level != android.content.ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) return;
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (now - lastMemoryWarningAt < 10000) return;
+        lastMemoryWarningAt = now;
+        android.app.ActivityManager manager =
+            (android.app.ActivityManager) getSystemService(ACTIVITY_SERVICE);
+        android.app.ActivityManager.MemoryInfo info = new android.app.ActivityManager.MemoryInfo();
+        if (manager != null) manager.getMemoryInfo(info);
+        android.os.Debug.MemoryInfo process = new android.os.Debug.MemoryInfo();
+        android.os.Debug.getMemoryInfo(process);
+        long pssMb = process.getTotalPss() / 1024L;
+        long availableMb = info.availMem / (1024L * 1024L);
+        hudLog("memory pressure: level=" + level + " processPss=" + pssMb
+            + "MB available=" + availableMb + "MB lowMemory=" + info.lowMemory
+            + "; GPU resources retained until native renderer safely evicts them");
+    }
+
     @Override public void onCreate(Bundle state) {
         // Initialize the Vulkan proxy in this process before native rendering.
         if (!DriverBridge.prepare(this)) {
