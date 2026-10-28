@@ -706,6 +706,8 @@ struct Buf {
     // Only single-purpose vertex/index buffers can be dropped and recreated.
     restore_usage: Option<BufferUsages>,
     restore_zero: bool,
+    // Distinguish an actual GPU rehydration from its first allocation.
+    was_evicted: bool,
     // Bounded CPU copy for small buffers; keeps all updates intact on reload.
     restore_data: Option<Vec<u8>>,
     shadow: Option<Vec<u8>>,
@@ -720,7 +722,7 @@ struct Buf {
 // Restrict deferral to single-purpose vertex/index buffers. Complex bind flags
 // and misc usage (including indirect/UAV storage) retain eager allocation.
 const GPU_BUFFER_SOFT_LIMIT: u64 = 45_000;
-const GPU_BUFFER_SWEEP_GOAL: usize = 10_000;
+const GPU_BUFFER_SWEEP_GOAL: usize = 15_000;
 const GPU_EVICT_PER_FRAME: usize = 128;
 const GPU_EVICT_COLD_FRAMES: u64 = 600;
 const GPU_RESTORE_BUFFER_MAX: u64 = 16 * 1024;
@@ -1446,17 +1448,18 @@ impl Gpu {
         });
         // Restore the exact contents before allowing a previously evicted
         // guest-owned buffer to be drawn, read back or copied.
-        let had_restore = self.buf(id).is_some_and(|b| b.restore_data.is_some());
+        let was_evicted = self.buf(id).is_some_and(|b| b.was_evicted);
         if let Some(data) = self.buf(id).and_then(|b| b.restore_data.as_deref()) {
             self.queue.write_buffer(&gpu, 0, data);
         }
         let b = self.buf_mut(id)?;
         b.gpu = Some(gpu.clone());
         b.deferred_usage = None;
+        b.was_evicted = false;
         self.live_gpu_buffer_bytes = self.live_gpu_buffer_bytes.saturating_add(bytes);
         self.live_gpu_buffer_count += 1;
         self.deferred_buffer_allocations += 1;
-        if had_restore { self.restored_buffers += 1; }
+        if was_evicted { self.restored_buffers += 1; }
         Some(gpu)
     }
     fn record_buffer_upload(&mut self, id: u32, offset: u64, data: &[u8]) {
@@ -1500,7 +1503,7 @@ impl Gpu {
         }
     }
     // Trigger when physical GPU buffers exceed 45k. Evict at most the oldest
-    // 10k recoverable allocations, spread over frames to avoid an FPS hitch.
+    // 15k recoverable allocations, spread over frames to avoid an FPS hitch.
     // Never delete the guest's object ID: all evictions are rehydratable.
     fn trim_gpu_buffers(&mut self) {
         if !cfg!(target_os = "android") { return; }
@@ -1540,6 +1543,7 @@ impl Gpu {
             let Some(b) = self.buf_mut(id) else { continue };
             let Some(gpu) = b.gpu.take() else { continue };
             b.deferred_usage = b.restore_usage;
+            b.was_evicted = true;
             let size = b.bytes;
             // GPU submissions that already own a handle finish normally.
             // This is only selected for buffers idle for >=600 presented frames.
@@ -2037,7 +2041,8 @@ impl Gpu {
         // Allocating the full buffer size upfront costs host memory for every
         // constant buffer the engine creates, and it never shrinks.
         let mut b = Buf { size, stride, gpu: None, bytes: 0,
-            deferred_usage: None, restore_usage: None, restore_zero: false, restore_data: None,
+            deferred_usage: None, restore_usage: None, restore_zero: false,
+            was_evicted: false, restore_data: None,
             shadow: None, version: 0, enc: 0, in_bg: false,
             born_frame: self.presents, last_used_frame: None, counter: None };
         if bind & 4 != 0 { b.shadow = Some(Vec::new()); }
@@ -4334,7 +4339,7 @@ mod tests {
 
     fn shadow_buffer(size: u64) -> Buf {
         Buf { size, stride: 0, gpu: None, bytes: 0, deferred_usage: None,
-            restore_usage: None, restore_zero: false, restore_data: None,
+            restore_usage: None, restore_zero: false, was_evicted: false, restore_data: None,
             shadow: Some(Vec::new()), version: 0, enc: 0, in_bg: false,
             born_frame: 0, last_used_frame: None, counter: None }
     }
