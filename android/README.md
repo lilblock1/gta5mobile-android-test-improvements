@@ -7,17 +7,7 @@ No proprietary game files are included in the APK.
 This fork installs as **Grand V Android Test** under application ID
 `dev.muguet.test`. It can be installed alongside the original `dev.muguet` app
 without replacing it. Each app has separate private game files, saves and config;
-the test app can reuse the **same shared-storage game folder** as the original
-without duplicating game files: tap **Reuse existing shared game folder (no copy)**
-and select the directory containing `data/manifest.json` and `b/<build>/`.
-Both apps must have filesystem read access; the native runtime cannot open
-`content://` streams directly. The original app's private
-`/data/user/0/dev.muguet/files/game` directory is inaccessible to this
-different application ID on a normal non-rooted device. If that is the only
-existing installation, the original app must first export or relocate its
-game files to an Android-accessible shared folder; the test APK cannot simply
-point at the private directory. The apps intentionally keep separate saves,
-compiled caches and settings. Updates to
+the test app must import or select compatible game files separately. Updates to
 the test app require the same signing key; fresh CI debug keys may require
 uninstalling only the existing test app (which deletes its private game files
 and saves). This is not an official Rockstar app.
