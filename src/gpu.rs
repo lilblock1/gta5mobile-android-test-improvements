@@ -4,7 +4,7 @@
 use crate::mem_base_len;
 use regex::Regex;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
@@ -717,19 +717,31 @@ impl<V> FifoCache<V> {
     }
     fn get(&self, key: &[u64]) -> Option<&V> { self.entries.get(key) }
     fn len(&self) -> usize { self.entries.len() }
-    fn insert(&mut self, key: Vec<u64>, value: V) {
-        if self.capacity == 0 { return; }
+    // Return the evicted or replaced value so callers can retire any
+    // dependency bookkeeping along with its GPU handle.
+    fn insert(&mut self, key: Vec<u64>, value: V) -> Option<V> {
+        if self.capacity == 0 { return Some(value); }
         if let Some(existing) = self.entries.get_mut(&key) {
-            *existing = value;
-            return;
+            return Some(std::mem::replace(existing, value));
         }
+        let mut removed = None;
         while self.entries.len() >= self.capacity {
             let oldest = self.order.pop_front().expect("cached entries have FIFO keys");
-            self.entries.remove(&oldest);
+            removed = self.entries.remove(&oldest);
             self.evictions += 1;
         }
         self.order.push_back(key.clone());
         self.entries.insert(key, value);
+        removed
+    }
+    fn remove_where(&mut self, mut pred: impl FnMut(&[u64], &V) -> bool) -> Vec<V> {
+        let keys: HashSet<Vec<u64>> = self.entries.iter()
+            .filter(|(k, v)| pred(k, v))
+            .map(|(k, _)| k.clone())
+            .collect();
+        if keys.is_empty() { return Vec::new(); }
+        self.order.retain(|key| !keys.contains(key));
+        keys.into_iter().filter_map(|key| self.entries.remove(&key)).collect()
     }
 }
 #[derive(Clone, Copy)]
@@ -936,6 +948,11 @@ struct PendingClear { color: Option<Color>, depth: Option<f32>, stencil: Option<
 
 struct Chunk { buf: Buffer, id: u64, base: u64, stage: Vec<u8>, lo: u64, hi: u64 }
 struct BgResult { bg: BindGroup, uid: u64, dyn_off: Option<u32> }
+// A cached bind group keeps its referenced GPU buffers, texture views and
+// samplers alive. Track the engine object IDs that own those GPU handles so
+// a destroy can release the cached reference immediately rather than waiting
+// for FIFO churn to evict it.
+struct CachedBg { bg: BindGroup, uid: u64, deps: Vec<u32> }
 
 struct PendingMap {
     buf: Buffer,
@@ -985,7 +1002,8 @@ pub struct Gpu {
     pending_skips: u64,
     pending_skips0: u64,
     compute: HashMap<String, Option<(ComputePipeline, BindGroupLayout, u64, Rc<Program>)>>,
-    bind_groups: FifoCache<(BindGroup, u64)>,
+    bind_groups: FifoCache<CachedBg>,
+    bg_ref_counts: HashMap<u32, u32>,
     ubo_slots: Vec<Vec<Chunk>>,
     ubo_shared: Vec<(Buffer, u64)>,
     ubo_slot: usize,
@@ -1195,7 +1213,8 @@ impl Gpu {
             objs: Vec::new(), resource_creates: [0; 3], resource_destroys: [0; 3], resource_replacements: 0,
             enc: None, enc_epoch: 1, pass: None, pass_key: None, pass_info: None, pass_st: PassSt::default(),
             s: State::new(), pdirty: true, last_pl: None, shader_index, shader_dir, next_uid: 1,
-            bgl_cache: HashMap::new(), empty_bgl: None, pipelines: HashMap::new(), compute: HashMap::new(), bind_groups: FifoCache::new(BG_LIMIT),
+            bgl_cache: HashMap::new(), empty_bgl: None, pipelines: HashMap::new(), compute: HashMap::new(),
+            bind_groups: FifoCache::new(BG_LIMIT), bg_ref_counts: HashMap::new(),
             ubo_slots: (0..FRAME_SLOTS).map(|_| Vec::new()).collect(), ubo_shared: Vec::new(), ubo_slot: 0, ubo_chunk: 0, ubo_off: 0,
             dummy_tex: HashMap::new(), dummy_smp: None, dummy_cmp: None, dummy_bufs: HashMap::new(), zero_vb: None, zero_src: None, scratch: None,
             proxy_pipelines: HashMap::new(), f2d_pipeline: None, blit: None, mip_pipelines: HashMap::new(), mip_sampler: None,
@@ -1587,6 +1606,7 @@ impl Gpu {
         if self.is_bound(id) { self.pdirty = true; }
         if self.obj(id).is_none() { return; }
         if self.used(id) { self.flush(); }
+        self.invalidate_cached_bind_groups_for(id);
         if let Some(o) = self.objs.get_mut(id as usize).and_then(|o| o.take()) {
             match o {
                 Obj::Tex(t) => {
@@ -1598,9 +1618,56 @@ impl Gpu {
                     if let Some(g) = b.gpu { g.destroy(); }
                 }
                 Obj::Srv(_) | Obj::Uav(_) => self.resource_destroys[2] += 1,
+                Obj::Shader(shader) => {
+                    if let Some(Some(prog)) = shader.program {
+                        self.invalidate_shader_caches(prog.uid);
+                    }
+                }
                 _ => {}
             }
         }
+    }
+    fn track_cached_bg(&mut self, cached: &CachedBg) {
+        for &id in &cached.deps {
+            *self.bg_ref_counts.entry(id).or_insert(0) += 1;
+        }
+    }
+    fn untrack_cached_bg(&mut self, cached: &CachedBg) {
+        for &id in &cached.deps {
+            if let Some(count) = self.bg_ref_counts.get_mut(&id) {
+                if *count > 1 { *count -= 1; } else { self.bg_ref_counts.remove(&id); }
+            }
+        }
+    }
+    fn invalidate_cached_bind_groups_for(&mut self, id: u32) {
+        if !self.bg_ref_counts.contains_key(&id) { return; }
+        let removed = self.bind_groups.remove_where(|_, cached| cached.deps.contains(&id));
+        for cached in &removed { self.untrack_cached_bg(cached); }
+    }
+    fn invalidate_shader_caches(&mut self, uid: u64) {
+        // Cache keys contain unique program generation IDs, not engine shader
+        // IDs. Invalidate every derived handle, including pending compilation
+        // jobs; results from a destroyed shader are discarded on arrival.
+        let marker = format!("#{uid}");
+        self.bgl_cache.retain(|(label, _, _), _| !label.ends_with(&marker));
+        let uid_i64 = uid as i64;
+        let refers_to_shader = |key: &[i64]| key.first() == Some(&uid_i64) || key.get(1) == Some(&uid_i64);
+        self.pipelines.retain(|key, _| !refers_to_shader(key));
+        self.pipe_pending.retain(|_, (key, _, _)| !refers_to_shader(key));
+        let compute_prefix = format!("{uid}|");
+        let mut released_programs: HashSet<u64> = HashSet::from([uid]);
+        self.compute.retain(|key, value| {
+            if key.starts_with(&compute_prefix) {
+                if let Some((_, _, _, prog)) = value { released_programs.insert(prog.uid); }
+                false
+            } else { true }
+        });
+        let removed = self.bind_groups.remove_where(|key, _| {
+            key.get(1).is_some_and(|program| released_programs.contains(program))
+        });
+        for cached in &removed { self.untrack_cached_bg(cached); }
+        self.last_pl = None;
+        self.pdirty = true;
     }
     fn is_bound(&self, id: u32) -> bool {
         let s = &self.s;
@@ -2453,6 +2520,7 @@ impl Gpu {
         // An absent group can still be a valid empty compute bind group.
         let bindings = prog.group_bindings.get(&group).map(Vec::as_slice).unwrap_or(&[]);
         let mut entries: Vec<(u32, Res)> = Vec::with_capacity(bindings.len());
+        let mut deps: Vec<u32> = Vec::new();
         let mut key: Vec<u64> = vec![bgl.1, prog.uid, stage as u64];
         let mut dyn_off = None;
         for b in bindings {
@@ -2473,6 +2541,7 @@ impl Gpu {
                 }
                 Kind::Sampler | Kind::SamplerCmp => {
                     let sid = *self.s.smp[stage].get((b.binding as usize).wrapping_sub(16)).unwrap_or(&0);
+                    if sid != 0 { deps.push(sid); }
                     let want_cmp = b.kind == Kind::SamplerCmp;
                     let st = self.state(sid);
                     let s = match st.as_ref().and_then(|s| s.sampler.clone().filter(|_| ((s.words.first().copied().unwrap_or(0) & 0x80) != 0) == want_cmp)) {
@@ -2483,6 +2552,8 @@ impl Gpu {
                 }
                 Kind::Texture => {
                     let id = *self.s.srv[stage].get((b.binding as usize).wrapping_sub(32)).unwrap_or(&0);
+                    if id != 0 { deps.push(id); }
+                    if let Some(res) = self.view_obj(id).map(|v| v.res) { if res != 0 { deps.push(res); } }
                     let is_tex = self.view_obj(id).map(|v| !v.is_buf).unwrap_or(false);
                     if is_tex { if let Some(r) = self.view_obj(id).map(|v| v.res) { if self.pending_clears.contains_key(&r) { self.materialize_clears(r); } } }
                     let v = if is_tex { self.srv_view(id, b) } else { None };
@@ -2502,6 +2573,8 @@ impl Gpu {
                     let is_counter = b.binding >= 176;
                     let is_uav = b.binding >= 160;
                     let id = if is_uav { *self.s.uav[stage].get((b.binding - if is_counter { 176 } else { 160 }) as usize).unwrap_or(&0) } else { *self.s.srv[stage].get((b.binding as usize).wrapping_sub(32)).unwrap_or(&0) };
+                    if id != 0 { deps.push(id); }
+                    if let Some(res) = self.view_obj(id).map(|v| v.res) { if res != 0 { deps.push(res); } }
                     let buf_id = self.view_obj(id).filter(|v| v.is_buf).map(|v| (v.res, v.a, v.b));
                     let mut res_off = 0;
                     let mut res_size = None;
@@ -2535,6 +2608,8 @@ impl Gpu {
                 }
                 Kind::StorageTexture => {
                     let uid = *self.s.uav[stage].get((b.binding as usize).wrapping_sub(160)).unwrap_or(&0);
+                    if uid != 0 { deps.push(uid); }
+                    if let Some(res) = self.view_obj(uid).map(|v| v.res) { if res != 0 { deps.push(res); } }
                     let (res, a, bb, c, vdim) = match self.view_obj(uid).filter(|v| !v.is_buf) { Some(v) => (v.res, v.a, v.b, v.c, v.vdim), None => {
                         log_once(&format!("nouavtex{}", prog.label), &format!("{}: storage texture u{} has no UAV bound", prog.label, b.binding - 160));
                         return None;
@@ -2566,8 +2641,8 @@ impl Gpu {
                 }
             }
         }
-        if let Some((bg, uid)) = self.bind_groups.get(&key) {
-            return Some(BgResult { bg: bg.clone(), uid: *uid, dyn_off });
+        if let Some(cached) = self.bind_groups.get(&key) {
+            return Some(BgResult { bg: cached.bg.clone(), uid: cached.uid, dyn_off });
         }
         let wentries: Vec<BindGroupEntry> = entries.iter().map(|(binding, r)| BindGroupEntry {
             binding: *binding,
@@ -2579,7 +2654,13 @@ impl Gpu {
         }).collect();
         let bg = self.scoped(&format!("bind group {}", prog.label), |d| d.create_bind_group(&BindGroupDescriptor { label: None, layout: &bgl.0, entries: &wentries }))?;
         let uid = self.uid();
-        self.bind_groups.insert(key, (bg.clone(), uid));
+        deps.sort_unstable();
+        deps.dedup();
+        let cached = CachedBg { bg: bg.clone(), uid, deps };
+        if let Some(old) = self.bind_groups.insert(key, CachedBg {
+            bg: cached.bg.clone(), uid: cached.uid, deps: cached.deps.clone(),
+        }) { self.untrack_cached_bg(&old); }
+        self.track_cached_bg(&cached);
         Some(BgResult { bg, uid, dyn_off })
     }
 
