@@ -197,6 +197,50 @@ public final class LauncherActivity extends Activity {
     private JSONObject settings;
     private boolean importing;
 
+    private int dp(int value) {
+        return (int) (value * getResources().getDisplayMetrics().density + 0.5f);
+    }
+
+    private android.graphics.drawable.GradientDrawable rounded(int color, int stroke) {
+        android.graphics.drawable.GradientDrawable shape = new android.graphics.drawable.GradientDrawable();
+        shape.setColor(color);
+        shape.setCornerRadius(dp(16));
+        shape.setStroke(dp(1), stroke);
+        return shape;
+    }
+
+    private void styleLauncherChild(android.view.View child) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+            android.view.ViewGroup.LayoutParams.WRAP_CONTENT);
+        params.setMargins(0, dp(5), 0, dp(9));
+        child.setLayoutParams(params);
+        if (child instanceof Button) {
+            Button button = (Button) child;
+            button.setAllCaps(false);
+            button.setTextColor(0xFFF3F7FF);
+            button.setTextSize(15);
+            button.setTypeface(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD);
+            button.setBackground(rounded(0xFF1C2A3D, 0xFF344760));
+            button.setPadding(dp(16), dp(13), dp(16), dp(13));
+            button.setMinHeight(dp(52));
+            button.setElevation(dp(2));
+        } else if (child instanceof EditText) {
+            EditText input = (EditText) child;
+            input.setTextColor(0xFFF3F7FF);
+            input.setHintTextColor(0xFF91A0B5);
+            input.setBackground(rounded(0xFF182335, 0xFF344760));
+            input.setPadding(dp(14), dp(13), dp(14), dp(13));
+        } else if (child instanceof TextView) {
+            TextView text = (TextView) child;
+            if (text.getCurrentTextColor() != 0xFF70D8FF) text.setTextColor(0xFFD5E0EF);
+            text.setLineSpacing(dp(2), 1f);
+        } else if (child instanceof Spinner) {
+            child.setBackground(rounded(0xFF1C2A3D, 0xFF344760));
+            child.setPadding(dp(10), dp(8), dp(10), dp(8));
+        }
+    }
+
     @Override public void onCreate(Bundle saved) {
         super.onCreate(saved);
         ScrollView scroll = new ScrollView(this);
@@ -205,11 +249,28 @@ public final class LauncherActivity extends Activity {
         int padding = (int) (24 * getResources().getDisplayMetrics().density);
         column.setPadding(padding, padding, padding, padding);
         scroll.addView(column);
+        scroll.setFillViewport(true);
+        scroll.setBackgroundColor(0xFF0B101A);
+        column.setPadding(dp(20), dp(24), dp(20), dp(36));
+        column.setOnHierarchyChangeListener(new android.view.ViewGroup.OnHierarchyChangeListener() {
+            @Override public void onChildViewAdded(android.view.View parent, android.view.View child) {
+                styleLauncherChild(child);
+            }
+            @Override public void onChildViewRemoved(android.view.View parent, android.view.View child) {}
+        });
         setContentView(scroll);
         TextView title = new TextView(this);
-        title.setText("Grand V Android Test");
-        title.setTextSize(24);
+        title.setText("GRAND V");
+        title.setTextSize(32);
+        title.setTypeface(android.graphics.Typeface.create("sans-serif-black", android.graphics.Typeface.BOLD));
+        title.setLetterSpacing(0.08f);
         column.addView(title);
+        TextView subtitle = new TextView(this);
+        subtitle.setText("ANDROID  /  EXPERIMENTAL");
+        subtitle.setTextSize(12);
+        subtitle.setLetterSpacing(0.15f);
+        subtitle.setTextColor(0xFF70D8FF);
+        column.addView(subtitle);
         TextView warning = new TextView(this);
         warning.setText("ARM64 / Android 10+ / Vulkan. A high-end phone with 8–12 GB RAM is recommended, not a guarantee of compatibility. Supply your own web-port data: import a ZIP, or point the app at a folder that already holds data/ and b/<build>/ with game.wasm and shaders inside. A normal PC installation is not enough. First launch compiles the game and may take several minutes.");
         column.addView(warning);
