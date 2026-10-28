@@ -25,6 +25,10 @@ const ZERO_VB_SIZE: u64 = 4096;
 const OCCLUSION_CAPACITY: u32 = 2048;
 const OCCLUSION_VISIBLE_COUNT: u64 = 65536;
 const BG_LIMIT: usize = if cfg!(target_os = "android") { 4096 } else { 24000 };
+// Render pipelines can retain driver-side shader variants for the life of
+// the renderer. Keep a generous bounded cache on mobile and do not evict
+// pipelines that are still being compiled on worker threads.
+const PIPELINE_LIMIT: usize = if cfg!(target_os = "android") { 4096 } else { 16384 };
 
 pub struct SurfaceHandoff {
     pub instance: Instance,
@@ -996,6 +1000,8 @@ pub struct Gpu {
     bgl_cache: HashMap<(String, u32, u32), (BindGroupLayout, u64)>,
     empty_bgl: Option<(BindGroupLayout, u64)>,
     pipelines: HashMap<Vec<i64>, PipeEntry>,
+    pipeline_fifo: VecDeque<Vec<i64>>,
+    pipeline_evictions: u64,
     pipe_jobs: Option<std::sync::mpsc::Sender<(u64, PipeJob)>>,
     pipe_results: std::sync::mpsc::Receiver<(u64, Option<RenderPipeline>)>,
     pipe_pending: HashMap<u64, (Vec<i64>, Vec<VbReq>, String)>,
@@ -1213,8 +1219,9 @@ impl Gpu {
             objs: Vec::new(), resource_creates: [0; 3], resource_destroys: [0; 3], resource_replacements: 0,
             enc: None, enc_epoch: 1, pass: None, pass_key: None, pass_info: None, pass_st: PassSt::default(),
             s: State::new(), pdirty: true, last_pl: None, shader_index, shader_dir, next_uid: 1,
-            bgl_cache: HashMap::new(), empty_bgl: None, pipelines: HashMap::new(), compute: HashMap::new(),
-            bind_groups: FifoCache::new(BG_LIMIT), bg_ref_counts: HashMap::new(),
+            bgl_cache: HashMap::new(), empty_bgl: None, pipelines: HashMap::new(),
+            pipeline_fifo: VecDeque::new(), pipeline_evictions: 0,
+            compute: HashMap::new(), bind_groups: FifoCache::new(BG_LIMIT), bg_ref_counts: HashMap::new(),
             ubo_slots: (0..FRAME_SLOTS).map(|_| Vec::new()).collect(), ubo_shared: Vec::new(), ubo_slot: 0, ubo_chunk: 0, ubo_off: 0,
             dummy_tex: HashMap::new(), dummy_smp: None, dummy_cmp: None, dummy_bufs: HashMap::new(), zero_vb: None, zero_src: None, scratch: None,
             proxy_pipelines: HashMap::new(), f2d_pipeline: None, blit: None, mip_pipelines: HashMap::new(), mip_sampler: None,
@@ -1653,6 +1660,7 @@ impl Gpu {
         let uid_i64 = uid as i64;
         let refers_to_shader = |key: &[i64]| key.first() == Some(&uid_i64) || key.get(1) == Some(&uid_i64);
         self.pipelines.retain(|key, _| !refers_to_shader(key));
+        self.pipeline_fifo.retain(|key| !refers_to_shader(key));
         self.pipe_pending.retain(|_, (key, _, _)| !refers_to_shader(key));
         let compute_prefix = format!("{uid}|");
         let mut released_programs: HashSet<u64> = HashSet::from([uid]);
@@ -2664,6 +2672,38 @@ impl Gpu {
         Some(BgResult { bg, uid, dyn_off })
     }
 
+    fn insert_pipeline(&mut self, key: Vec<i64>, entry: PipeEntry) -> bool {
+        if self.pipelines.contains_key(&key) {
+            self.pipelines.insert(key, entry);
+            return true;
+        }
+        if self.pipelines.len() >= PIPELINE_LIMIT {
+            // FIFO eviction only touches completed pipelines. Evicting a
+            // pending compilation would let the same variant be submitted
+            // again and could grow the compiler queue without limit.
+            let scans = self.pipeline_fifo.len();
+            for _ in 0..scans {
+                let Some(old) = self.pipeline_fifo.pop_front() else { break };
+                match self.pipelines.get(&old) {
+                    Some(PipeEntry::Pending) => self.pipeline_fifo.push_back(old),
+                    Some(PipeEntry::Done(_)) => {
+                        self.pipelines.remove(&old);
+                        self.pipeline_evictions += 1;
+                        break;
+                    }
+                    None => {}
+                }
+            }
+            if self.pipelines.len() >= PIPELINE_LIMIT {
+                log_once("pipeline-cap", "pipeline cache is full of in-flight compilations; deferring new pipeline");
+                return false;
+            }
+        }
+        self.pipeline_fifo.push_back(key.clone());
+        self.pipelines.insert(key, entry);
+        true
+    }
+
     fn get_pipeline(&mut self, vs_id: u32, ps_id: u32, vs: &Rc<Program>, ps: Option<&Rc<Program>>, layout: &Rc<LayoutObj>) -> Option<Rc<Pl>> {
         let pi = self.pass_info.clone()?;
         let (topo, strip) = topology(self.s.topo);
@@ -2682,19 +2722,26 @@ impl Gpu {
         }
         self.pipe_creates += 1;
         let Some((job, vb_req)) = self.create_pipeline(vs, ps, layout, &strides, topo, strip_fmt, &pi) else {
-            self.pipelines.insert(key, PipeEntry::Done(None));
+            self.insert_pipeline(key, PipeEntry::Done(None));
             return None;
         };
         if let Some(tx) = self.pipe_jobs.clone() {
             let id = self.uid();
+            if !self.insert_pipeline(key.clone(), PipeEntry::Pending) {
+                self.pending_skips += 1;
+                return None;
+            }
             self.pipe_pending.insert(id, (key.clone(), vb_req, job.label.clone()));
-            self.pipelines.insert(key, PipeEntry::Pending);
-            let _ = tx.send((id, job));
+            if tx.send((id, job)).is_err() {
+                self.pipe_pending.remove(&id);
+                self.pipelines.insert(key, PipeEntry::Done(None));
+                log_once("pipeline-workers", "pipeline compile workers stopped unexpectedly");
+            }
             self.pending_skips += 1;
             return None;
         }
         let pl = compile_pipeline(&self.device, &self.lost, &job).map(|pipeline| { let uid = self.uid(); Rc::new(Pl { pipeline, uid, vb_req, label: job.label }) });
-        self.pipelines.insert(key, PipeEntry::Done(pl.clone()));
+        self.insert_pipeline(key, PipeEntry::Done(pl.clone()));
         pl
     }
 
@@ -3725,11 +3772,11 @@ impl Gpu {
                 shadow_len >> 10, shadow_capacity >> 10, shadow_declared >> 10, uniform_staging >> 10,
                 self.bind_groups.len(), self.bind_groups.capacity, self.bind_groups.evictions));
             log(&format!(
-                "gpu stalls: frame-slot waits {} avg {:.3} ms max {:.3} ms | pipeline cache {} entries, compiling {}",
+                "gpu stalls: frame-slot waits {} avg {:.3} ms max {:.3} ms | pipeline cache {}/{} entries, compiling {}, FIFO evictions {}",
                 self.frame_waits,
                 if self.frame_waits == 0 { 0.0 } else { self.frame_wait_ns as f64 / self.frame_waits as f64 / 1e6 },
                 self.frame_wait_max_ns as f64 / 1e6,
-                self.pipelines.len(), self.pipe_pending.len(),
+                self.pipelines.len(), PIPELINE_LIMIT, self.pipe_pending.len(), self.pipeline_evictions,
             ));
             let scope_calls = GPU_SCOPE_CALLS.swap(0, Ordering::Relaxed);
             let scope_ns = GPU_SCOPE_NS.swap(0, Ordering::Relaxed);
