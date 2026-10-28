@@ -1016,6 +1016,10 @@ pub struct Gpu {
     fps_t0: Instant,
     fps_n0: u64,
     fps_d0: u64,
+    // Frame-slot waits protect in-flight uniforms. Measure rather than remove.
+    frame_waits: u64,
+    frame_wait_ns: u64,
+    frame_wait_max_ns: u64,
     errors: Arc<AtomicU64>,
     lost: Arc<AtomicBool>,
 
@@ -1191,7 +1195,9 @@ impl Gpu {
             pending_resolve: Vec::new(), pending_events: Vec::new(), pending_maps: Vec::new(), counter_src: None, counter_slot: 0,
             frame_slot_done: (0..FRAME_SLOTS).map(|_| None).collect(), last_submit: None, vb_avail: [0; 16],
             dbg_idx: if dbg != 0 { dbg + 424 } else { 0 },
-            draws: 0, skipped: 0, presents: 0, pipe_creates: 0, fps_t0: Instant::now(), fps_n0: 0, fps_d0: 0, errors, lost, inflight: Arc::new(AtomicU64::new(0)), submits: 0, submits0: 0, passes: 0, passes0: 0,
+            draws: 0, skipped: 0, presents: 0, pipe_creates: 0, fps_t0: Instant::now(), fps_n0: 0, fps_d0: 0,
+            frame_waits: 0, frame_wait_ns: 0, frame_wait_max_ns: 0,
+            errors, lost, inflight: Arc::new(AtomicU64::new(0)), submits: 0, submits0: 0, passes: 0, passes0: 0,
         })
     }
 
@@ -2365,17 +2371,23 @@ impl Gpu {
             return None;
         }
         let (ci, off) = self.uniform_alloc(pack.size);
-        let mut block = vec![0u8; pack.size as usize];
+        let end = (off + pack.size) as usize;
+        // Write directly into persistent uniform staging memory instead of
+        // allocating a temporary Vec and copying it again on every draw.
+        let objects = &self.objs;
+        let chunk = &mut self.ubo_slots[self.ubo_slot][ci];
+        if chunk.stage.len() < end {
+            chunk.stage.resize((end.max(262144)).next_power_of_two().min(RING_CHUNK as usize), 0);
+        }
+        chunk.stage[off as usize..end].fill(0);
         for m in &pack.members {
             let cb = self.s.cb[stage].get(m.binding as usize).cloned().unwrap_or_default();
-            if let Some(b) = self.buf(cb.buf) {
-                b.copy_shadow(cb.first as u64 * 16, &mut block[m.offset as usize..(m.offset + m.size) as usize]);
+            if let Some(Obj::Buf(b)) = objects.get(cb.buf as usize).and_then(|o| o.as_ref()) {
+                let begin = (off + m.offset) as usize;
+                let finish = begin + m.size as usize;
+                b.copy_shadow(cb.first as u64 * 16, &mut chunk.stage[begin..finish]);
             }
         }
-        let chunk = &mut self.ubo_slots[self.ubo_slot][ci];
-        let end = (off + pack.size) as usize;
-        if chunk.stage.len() < end { chunk.stage.resize((end.max(262144)).next_power_of_two().min(RING_CHUNK as usize), 0); }
-        chunk.stage[off as usize..end].copy_from_slice(&block);
         chunk.lo = chunk.lo.min(off);
         chunk.hi = chunk.hi.max(end as u64);
         Some((ci, off))
@@ -2416,11 +2428,12 @@ impl Gpu {
 
     fn stage_bind_group(&mut self, stage: usize, prog: &Program, group: u32, bgl: &(BindGroupLayout, u64)) -> Option<BgResult> {
         enum Res { Buf(Buffer, u64, Option<u64>), View(TextureView), Smp(Sampler) }
-        let bindings = prog.group_bindings.get(&group).cloned().unwrap_or_default();
-        let mut entries: Vec<(u32, Res)> = Vec::new();
+        // Avoid cloning immutable shader binding descriptions on every draw.
+        let Some(bindings) = prog.group_bindings.get(&group) else { return None };
+        let mut entries: Vec<(u32, Res)> = Vec::with_capacity(bindings.len());
         let mut key: Vec<u64> = vec![bgl.1, prog.uid, stage as u64];
         let mut dyn_off = None;
-        for b in &bindings {
+        for b in bindings {
             match b.kind {
                 Kind::Uniform => {
                     if b.binding == 15 {
@@ -3550,7 +3563,12 @@ impl Gpu {
         self.ubo_chunk = 0;
         self.ubo_off = 0;
         if let Some(idx) = self.frame_slot_done[self.ubo_slot].take() {
+            let started = Instant::now();
             let _ = self.device.poll(PollType::Wait { submission_index: Some(idx), timeout: None });
+            let elapsed = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+            self.frame_waits += 1;
+            self.frame_wait_ns = self.frame_wait_ns.saturating_add(elapsed);
+            self.frame_wait_max_ns = self.frame_wait_max_ns.max(elapsed);
         }
         self.process_maps(false);
     }
@@ -3603,6 +3621,16 @@ impl Gpu {
             log(&format!("host buffer memory: shadow data {} KiB, allocated {} KiB, declared {} KiB; uniform staging {} KiB; bind group cache {}/{} ({} evictions)",
                 shadow_len >> 10, shadow_capacity >> 10, shadow_declared >> 10, uniform_staging >> 10,
                 self.bind_groups.len(), self.bind_groups.capacity, self.bind_groups.evictions));
+            log(&format!(
+                "gpu stalls: frame-slot waits {} avg {:.3} ms max {:.3} ms | pipeline cache {} entries, compiling {}",
+                self.frame_waits,
+                if self.frame_waits == 0 { 0.0 } else { self.frame_wait_ns as f64 / self.frame_waits as f64 / 1e6 },
+                self.frame_wait_max_ns as f64 / 1e6,
+                self.pipelines.len(), self.pipe_pending.len(),
+            ));
+            self.frame_waits = 0;
+            self.frame_wait_ns = 0;
+            self.frame_wait_max_ns = 0;
             self.submits0 = self.submits;
             self.pending_skips0 = self.pending_skips;
             self.passes0 = self.passes;
