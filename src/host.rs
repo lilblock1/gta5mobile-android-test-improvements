@@ -9,6 +9,7 @@ use anyhow::Result;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 use wasmtime::{Caller, SharedMemory, Val};
 
 #[derive(Debug)]
@@ -28,6 +29,32 @@ impl std::error::Error for LongJmp {}
 static PENDING_MAILBOX: LazyLock<Mutex<HashSet<u64>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 static ANY_PENDING: AtomicU64 = AtomicU64::new(0);
 static STUB_SEQ: AtomicU64 = AtomicU64::new(0);
+
+// Cloth buffer warnings recur thousands of times while streaming. Keep the
+// first message and periodic counts, but avoid writing identical warnings on
+// every engine call. Errors and other messages remain unfiltered.
+struct ClothWarnings {
+    last_print: Option<Instant>,
+    suppressed: u64,
+}
+static CLOTH_WARNINGS: Mutex<ClothWarnings> = Mutex::new(ClothWarnings { last_print: None, suppressed: 0 });
+
+fn log_engine_line(source: &str, line: &str) {
+    if line.contains("GPU version of buffer not updated!") {
+        let mut state = CLOTH_WARNINGS.lock().unwrap();
+        let now = Instant::now();
+        if state.last_print.is_some_and(|time| now.duration_since(time) < Duration::from_secs(10)) {
+            state.suppressed += 1;
+            return;
+        }
+        if state.suppressed != 0 {
+            eprintln!("[eng] repeated cloth-buffer warning suppressed {} times in preceding interval", state.suppressed);
+            state.suppressed = 0;
+        }
+        state.last_print = Some(now);
+    }
+    eprintln!("[{source}] {line}");
+}
 
 thread_local! {
     static PENDING_LONGJMP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -168,7 +195,7 @@ pub fn call(mut caller: Caller<'_, HostState>, idx: usize, params: &[Val], resul
         "environ_get" => set_int(results, 0),
 
         "wasm_print_line_js" | "wasm_hang_line_js" => {
-            eprintln!("[eng] {}", read_cstr(mem, int(params, 0) as u64));
+            log_engine_line("eng", &read_cstr(mem, int(params, 0) as u64));
         }
         "wasm_module_int_js" => set_int(results, int(params, 1)),
         "wasm_has_page_js" => set_int(results, 1),
@@ -190,7 +217,7 @@ pub fn call(mut caller: Caller<'_, HostState>, idx: usize, params: &[Val], resul
             write_u64(mem, int(params, 3) as u64, buf.len() as u64);
             let text = String::from_utf8_lossy(&buf);
             for line in text.lines() {
-                eprintln!("[eng:{}] {line}", int(params, 0));
+                log_engine_line(if int(params, 0) == 1 { "eng:1" } else { "eng:2" }, line);
             }
             set_int(results, 0);
         }
