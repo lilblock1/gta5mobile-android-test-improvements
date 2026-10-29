@@ -136,6 +136,14 @@ two players. That is the whole protocol — see `src/relay.rs` for the client an
 [bytarch/Grand-V-Android-Port](https://github.com/bytarch/Grand-V-Android-Port)
 for the server.
 
+### World streaming development plan
+
+The [Nightlane WorldStream roadmap](docs/NIGHTLANE_WORLDSTREAM.md) describes
+an incremental, experimental path toward improved file I/O, bounded read-ahead,
+RAM budgeting, and (only if feasible) geographic asset streaming. It is
+**a plan, not an implemented replacement**. The existing game streamer remains
+the baseline and every stage must pass tests before the next is attempted.
+
 ### Native engine core
 
 A separate build path compiles the upstream
