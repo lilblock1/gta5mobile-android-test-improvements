@@ -11,6 +11,7 @@ mod host;
 mod input;
 mod import;
 mod io;
+mod worldstream;
 mod mp;
 #[cfg(target_vendor = "apple")]
 mod pad;
