@@ -5,9 +5,10 @@
 > Android port. Respect upstream notices, the GPL-3.0-or-later license, and
 > user-supplied game-data requirements. Do not ship proprietary map assets.
 >
-> **Status: roadmap created; no WorldStream phase has been implemented or
-> benchmarked yet.** We implement, build, test, and review **one phase at a
-> time**. Each phase requires its exit criteria before starting the next.
+> **Current status: Phase 0 code committed; automated build and physical
+> device baseline still unverified.** No custom streaming backend has been
+> implemented. We implement, build, test, and review **one phase at a time**.
+> Each phase requires its exit criteria before starting the next.
 
 ## Why this is staged
 
@@ -66,7 +67,25 @@ measure engine requests and establish safe integration points.
 **Exit:** original mode behaves as before, CI passes, baseline captures
 repeatable data on the target phone; switch restores original behavior.
 
-**Status:** NOT STARTED.
+**Status: CODE IMPLEMENTED / VERIFICATION PENDING.**
+
+- `src/worldstream.rs` implements a version-1, validated phase switch.
+  The default is `original`. Choosing `experimental` is recorded but
+  intentionally routed back to Original until another backend exists.
+  Invalid values and unsupported configuration versions also use Original.
+- `src/config.rs` sets startup configuration and logs build SHA (when
+  available), FPS target, render scale, heap, LOD and streamer percentage.
+- `src/io.rs` retains the original synchronous byte-range response code and
+  handle LRU. Its I/O worker logs aggregate 10-second read/byte/open/eviction/
+  error counters without caching additional bytes or reading ahead.
+- Android launcher Settings exposes the honest Original/Reserved Experimental
+  selector. Wasmtime logs Android model/API and existing PSS measurements.
+- `src/worldstream.rs` includes configuration/fallback unit tests.
+- The repeatable test checklist and blank results table are in
+  [Phase 0 baseline report](WORLDSTREAM_PHASE0_BASELINE.md).
+- **Not yet verified:** successful CI build/tests, playable Android APK,
+  baseline captures on a physical Galaxy S25+, and comparison against the
+  previous stable APK. Do **not** mark Phase 0 finished before these checks.
 
 ## Phase 1 — Instrument the actual streaming path
 
@@ -216,7 +235,7 @@ spatially aware loading policy without breaking the original game.
 
 | Phase | Deliverable | Status | Evidence |
 |---|---|---|---|
-| 0 | Baseline + safety switch | Not started | — |
+| 0 | Baseline + safety switch | Code committed; CI/device verification pending | [Baseline test template](WORLDSTREAM_PHASE0_BASELINE.md) |
 | 1 | Streaming instrumentation | Not started | — |
 | 2 | Existing I/O improvements | Not started | — |
 | 3 | Bounded asynchronous read-ahead | Not started | — |
@@ -233,10 +252,10 @@ device tests where relevant, before/after metrics and rollback instructions.
 
 ## Suggested first step
 
-Start **Phase 0**, not spatial chunks: establish the original-mode toggle,
-baseline log format and build checks. Then use Phase 1 to measure actual
-streaming requests. The current architecture does not yet expose enough
-information for safe geographic chunk eviction.
+Verify **Phase 0** first: build/tests, unchanged Original-mode gameplay, and
+a repeatable exported log using the [baseline report](WORLDSTREAM_PHASE0_BASELINE.md).
+Then start Phase 1 if the evidence supports it. The current architecture does
+not yet expose enough information for safe geographic chunk eviction.
 
 ## Related source files
 
