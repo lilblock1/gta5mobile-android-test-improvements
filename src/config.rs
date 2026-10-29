@@ -377,7 +377,7 @@ fn apply_nightlane_lod_profile(xml: &str, profile: &str) -> String {
     };
     let mut updated = xml.to_owned();
     for (tag, value) in ["LodScale", "PedLodBias", "VehicleLodBias"].iter().zip(values) {
-        let expression = format!(r#"<{tag} value="(-?\\d+(?:\\.\\d+)?)"\\s*/>"#);
+        let expression = format!(r#"<{tag} value="(-?\d+(?:\.\d+)?)"\s*/>"#);
         let regex = regex::Regex::new(&expression).expect("valid graphics tag");
         if let Some(captured) = regex.captures(&updated) {
             let raw = captured[1].to_owned();
