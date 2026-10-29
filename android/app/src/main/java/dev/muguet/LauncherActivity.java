@@ -188,7 +188,7 @@ public final class LauncherActivity extends Activity {
     private Button play, playEngine, importButton, clearFolderButton, grantAccessButton;
     private TextView folderStatus;
     private ProgressBar progress;
-    private Spinner mode, heap, streamingBudget;
+    private Spinner mode, heap, streamingBudget, worldstreamMode;
     private Spinner nightlanePresent, nightlaneSharpness, nightlaneLod, nightlaneHudSize, nightlaneHudOpacity;
     private CheckBox nightlaneThermal, nightlaneCompactHud;
     private static final double[] STREAMING_BUDGETS = {0.35, 0.25, 0.15};
@@ -451,6 +451,17 @@ public final class LauncherActivity extends Activity {
         TextView graphicsHeader = new TextView(this);
         graphicsHeader.setText("Graphics — passed to the engine as arguments, the same knobs the web launcher exposes");
         column.addView(graphicsHeader);
+        TextView streamHeader = new TextView(this);
+        streamHeader.setText("WorldStream — Phase 0 baseline & safety");
+        column.addView(streamHeader);
+        String savedWorldstreamMode = settings.optString("nightlane_worldstream_mode", "original");
+        worldstreamMode = choice(column, "WorldStream backend",
+            new String[]{"Original — working game streaming (default)",
+                "Experimental — reserved; currently runs Original"},
+            "experimental".equalsIgnoreCase(savedWorldstreamMode) ? 1 : 0);
+        TextView streamNote = new TextView(this);
+        streamNote.setText("Phase 0 only measures the existing streamer. Experimental is a reserved switch: until the new backend passes testing, gameplay still uses Original. Export logs after a repeatable driving run.");
+        column.addView(streamNote);
         graphicsPreset = choice(column, "Graphics preset", new String[]{"Low (phone default)", "Engine default", "Max"}, 0);
         graphicsPreset.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> parent, android.view.View view, int position, long id) {
@@ -680,6 +691,9 @@ public final class LauncherActivity extends Activity {
             settings.put("start_mode", mode.getSelectedItemPosition() + 1);
             settings.put("android_heap_gb", heap.getSelectedItemPosition() + 3);
             settings.put("streamer_percentage", STREAMING_BUDGETS[streamingBudget.getSelectedItemPosition()]);
+            settings.put("nightlane_worldstream_config_version", 1);
+            settings.put("nightlane_worldstream_mode",
+                worldstreamMode.getSelectedItemPosition() == 1 ? "experimental" : "original");
             settings.put("texture_quality", settings.optInt("texture_quality", 0));
             settings.put("graphics", graphicsChoices());
             settings.put("extra_args", graphicsArgs());
