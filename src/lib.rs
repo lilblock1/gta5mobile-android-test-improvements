@@ -6,6 +6,7 @@ mod audio;
 mod config;
 mod fs;
 mod gpu;
+mod nightlane_render;
 mod host;
 mod input;
 mod import;
