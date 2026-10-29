@@ -27,7 +27,9 @@ const DEFAULT_CONFIG: &str = r#"{
   "extra_args": [],
   "phone_lod": true,
   "phone_graphics": false,
-  "streamer_percentage": 0.35
+  "streamer_percentage": 0.35,
+  "nightlane_worldstream_config_version": 1,
+  "nightlane_worldstream_mode": "original"
 }
 "#;
 
@@ -225,6 +227,15 @@ fn settings(cfg_path: &Path) -> Vec<String> {
         .unwrap_or_else(|| serde_json::from_str(DEFAULT_CONFIG).unwrap());
     let num = |k: &str| cfg.get(k).and_then(|v| v.as_f64());
     let flag = |k: &str| cfg.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+    // Phase 0 is intentionally behavior-preserving. Experimental selection is
+    // recognized, but cannot replace streaming until a future phase implements
+    // and tests an alternate backend. Invalid format versions use Original.
+    let worldstream = crate::worldstream::Selection::from_json(&cfg);
+    if cfg!(target_os = "android") {
+        set_default("NIGHTLANE_WORLDSTREAM_MODE", worldstream.requested.name());
+        set_default("NIGHTLANE_WORLDSTREAM_CONFIG_VERSION", worldstream.version.to_string());
+        eprintln!("{}", worldstream.log_line());
+    }
     if let Some(v) = num("scale") { set_default("MUGUET_SCALE", v.to_string()); }
     if let Some(v) = num("mouse_sensitivity") { set_default("MUGUET_MOUSE_SENS", v.to_string()); }
     if let Some(v) = num("touch_sensitivity") { set_default("MUGUET_TOUCH_SENS", v.to_string()); }
@@ -302,6 +313,17 @@ fn settings(cfg_path: &Path) -> Vec<String> {
     });
     let exact_fps = explicit_frame.filter(|n| matches!(n, 24 | 30 | 42 | 60));
     let target_fps = exact_fps.unwrap_or_else(|| fps.max(0.0).min(120.0).round() as u32);
+    if cfg!(target_os = "android") {
+        eprintln!(
+            "[worldstream-baseline] phase=0 build={} target_fps={} render_scale={:.3} streamer_budget_fraction={:.3} game_heap_gb={} lod_profile={} note=configuration_not_a_performance_measurement",
+            option_env!("GITHUB_SHA").unwrap_or("local-or-unknown"),
+            target_fps,
+            num("scale").unwrap_or(0.5),
+            num("streamer_percentage").unwrap_or(0.35),
+            num("android_heap_gb").unwrap_or(5.0),
+            cfg.get("nightlane_lod").and_then(|v| v.as_str()).unwrap_or("performance"),
+        );
+    }
     let normalized_frame = exact_fps.or_else(|| (explicit_frame.is_none()).then_some(target_fps));
     if let Some(target) = normalized_frame {
         engine_args.push(format!("-frameLimit={}", engine_frame_mode(target)));
