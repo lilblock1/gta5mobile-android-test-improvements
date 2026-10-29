@@ -245,8 +245,15 @@ fn settings(cfg_path: &Path) -> Vec<String> {
         // Vulkan presentation shader. Unknown values fall back to native.
         let nightlane_filter = cfg.get("nightlane_present")
             .and_then(|v| v.as_str()).unwrap_or("native");
-        set_default("NIGHTLANE_PRESENT",
-            if nightlane_filter.eq_ignore_ascii_case("smooth") { "smooth" } else { "native" });
+        let filtered = match nightlane_filter.to_ascii_lowercase().as_str() {
+            "smooth" => "smooth",
+            "sharp" => "sharp",
+            _ => "native",
+        };
+        set_default("NIGHTLANE_PRESENT", filtered);
+        set_default("NIGHTLANE_THERMAL_ADAPTIVE",
+            if cfg.get("nightlane_thermal_adaptive").and_then(|v| v.as_bool())
+                .unwrap_or(true) { "1" } else { "0" });
     }
 
     let text = |k: &str| cfg.get(k).and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty());
@@ -325,7 +332,10 @@ fn settings(cfg_path: &Path) -> Vec<String> {
         // Preserve custom native engine modes and unrelated arguments verbatim.
         !(exact_fps.is_some() && a.starts_with("-frameLimit="))
     }).map(|a| String::from(*a)));
-    fix_settings(num("texture_quality").map(|q| q as i64), phone_graphics, phone_lod);
+    let lod_profile = cfg.get("nightlane_lod").and_then(|v| v.as_str())
+        .unwrap_or("performance");
+    fix_settings(num("texture_quality").map(|q| q as i64), phone_graphics,
+        phone_lod && lod_profile != "original", lod_profile);
     engine_args
 }
 
@@ -344,15 +354,40 @@ fn streamer_budget_arg(requested: Option<f64>, extra_args: &[&str]) -> Option<St
     Some(format!("-percentageForStreamer={:.3}", percent.clamp(0.1, 0.95)))
 }
 
-fn fix_settings(texture_quality: Option<i64>, phone_graphics: bool, phone_lod: bool) {
+fn fix_settings(texture_quality: Option<i64>, phone_graphics: bool, phone_lod: bool, lod_profile: &str) {
     let path = support_dir().join("saves/userdata/Documents/Rockstar Games/GTA V/settings.xml");
     let Ok(xml) = std::fs::read_to_string(&path) else { return };
     // ponytail: adapter probe skipped when no MSAA tag exists; cached after first probe.
     let max_msaa = if xml.contains("MSAA") { crate::gpu::max_msaa() as i64 } else { i64::MAX };
     let new = apply_settings(&xml, texture_quality, phone_graphics, phone_lod, max_msaa);
+    let new = if phone_lod { apply_nightlane_lod_profile(&new, lod_profile) } else { new };
     if new != xml {
         let _ = std::fs::write(&path, new.as_bytes());
     }
+}
+
+// Change only the three LOD XML settings on launch, leaving shadows and
+// reflections untouched. Do not bump the game-owned object/texture caches.
+// The low/performance mode remains the original phone fallback.
+fn apply_nightlane_lod_profile(xml: &str, profile: &str) -> String {
+    let values = match profile {
+        "balanced" => [0.25, 0.10, 0.10],
+        "detail" => [0.45, 0.20, 0.20],
+        _ => return xml.to_owned(),
+    };
+    let mut updated = xml.to_owned();
+    for (tag, value) in ["LodScale", "PedLodBias", "VehicleLodBias"].iter().zip(values) {
+        let expression = format!(r#"<{tag} value="(-?\\d+(?:\\.\\d+)?)"\\s*/>"#);
+        let regex = regex::Regex::new(&expression).expect("valid graphics tag");
+        if let Some(captured) = regex.captures(&updated) {
+            let raw = captured[1].to_owned();
+            let replacement = if let Some((_, decimal)) = raw.split_once('.') {
+                format!("{:.*}", decimal.len(), value)
+            } else { format!("{}", value as i64) };
+            updated = regex.replace(&updated, format!(r#"<{tag} value="{replacement}" />"#).as_str()).into_owned();
+        }
+    }
+    updated
 }
 
 /// Returns the settings XML with the tags this port pins adjusted, logging each
@@ -418,6 +453,18 @@ mod tests {
     fn tag(xml: &str, name: &str) -> String {
         let re = regex::Regex::new(&format!(r#"<{name} value="[^"]*"\s*/>"#)).unwrap();
         re.captures(xml).unwrap()[0].to_string()
+    }
+
+    #[test]
+    fn nightlane_lod_preserves_phone_performance_fallback_and_offers_detail() {
+        let low = apply_settings(SAMPLE, None, false, true, 2);
+        assert_eq!(tag(&low, "LodScale"), r#"<LodScale value="0.000000" />"#);
+        assert_eq!(apply_nightlane_lod_profile(&low, "performance"), low);
+        let balanced = apply_nightlane_lod_profile(&low, "balanced");
+        assert_eq!(tag(&balanced, "LodScale"), r#"<LodScale value="0.250000" />"#);
+        assert_eq!(tag(&balanced, "PedLodBias"), r#"<PedLodBias value="0.100000" />"#);
+        let detail = apply_nightlane_lod_profile(&low, "detail");
+        assert_eq!(tag(&detail, "VehicleLodBias"), r#"<VehicleLodBias value="0.200000" />"#);
     }
 
     #[test]
