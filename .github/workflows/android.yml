@@ -1,4 +1,4 @@
-name: Grand V Android Test APK
+name: Nightlane Android experimental APK
 
 on:
   push:
@@ -73,14 +73,14 @@ jobs:
       - name: Upload installable debug APK
         uses: actions/upload-artifact@v5
         with:
-          name: GrandV-Android-Test-arm64-custom-vulkan-debug
+          name: Nightlane-Android-arm64-experimental-debug
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
       - name: Build summary
         run: |
           echo '### Android build' >> "$GITHUB_STEP_SUMMARY"
-          echo 'Download **GrandV-Android-Test-arm64-debug** from this run’s Artifacts section and extract the APK.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Download **Nightlane-Android-arm64-experimental-debug** from this run’s Artifacts section and extract the APK.' >> "$GITHUB_STEP_SUMMARY"
           echo 'Experimental ARM64 / Android 10+ / Vulkan. No game data is included. Device testing is still required.' >> "$GITHUB_STEP_SUMMARY"
 
   tests:
