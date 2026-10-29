@@ -144,6 +144,26 @@ pub static OCCLUDED: AtomicBool = AtomicBool::new(false);
 pub static SUSPENDED: AtomicBool = AtomicBool::new(false);
 
 pub static PRESENTS: AtomicU64 = AtomicU64::new(0);
+ // Android requests a bounded renderer-thread sweep. No GPU handles are touched
+ // from the Java callback; the request is consumed during frame presentation.
+static MEMORY_PRESSURE: AtomicI32 = AtomicI32::new(0);
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_dev_muguet_GameActivity_nativeMemoryPressure(
+    _env: *mut std::ffi::c_void, _class: *mut std::ffi::c_void, level: i32,
+) {
+    MEMORY_PRESSURE.fetch_max(level, Ordering::Relaxed);
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_dev_muguet_EngineActivity_nativeMemoryPressure(
+    _env: *mut std::ffi::c_void, _class: *mut std::ffi::c_void, level: i32,
+) {
+    MEMORY_PRESSURE.fetch_max(level, Ordering::Relaxed);
+}
+
 // UI telemetry is written once per second by the GPU thread. HUD readers only
 // load atomics: no GPU queries, allocation, mutex, or object scans per frame.
 // Counts are engine-owned IDs; buffer bytes exclude textures and driver usage.
@@ -1528,9 +1548,15 @@ impl Gpu {
     // Never delete the guest's object ID: all evictions are rehydratable.
     fn trim_gpu_buffers(&mut self) {
         if !cfg!(target_os = "android") { return; }
+        // The Android callback only sets an atomic. Keep scanning and actual
+        // wgpu destruction on this thread. A pressure sweep may run below the
+        // 45k cap, but still requires a complete CPU recovery source.
+        let pressure = MEMORY_PRESSURE.swap(0, Ordering::Relaxed);
+        let under_pressure = pressure >= 10;
+        let scan_interval = if under_pressure { 60 } else { 300 };
         if self.eviction_pending.is_empty()
-            && self.live_gpu_buffer_count > GPU_BUFFER_SOFT_LIMIT
-            && self.presents.saturating_sub(self.eviction_last_scan_frame) >= 300
+            && (under_pressure || self.live_gpu_buffer_count > GPU_BUFFER_SOFT_LIMIT)
+            && self.presents.saturating_sub(self.eviction_last_scan_frame) >= scan_interval
         {
             self.eviction_last_scan_frame = self.presents;
             let mut candidates: Vec<(u64, u32)> = self.objs.iter().enumerate().filter_map(|(index, obj)| {
@@ -1547,8 +1573,8 @@ impl Gpu {
                 if !self.is_bound(id) && !self.used(id) { self.eviction_pending.push_back(id); }
             }
             log(&format!(
-                "gpu eviction: pressure {} physical buffers (soft limit {}), queued {} oldest recoverable buffers (target {}); never evict unbacked guest data",
-                self.live_gpu_buffer_count, GPU_BUFFER_SOFT_LIMIT, self.eviction_pending.len(), GPU_BUFFER_SWEEP_GOAL
+                "gpu eviction: {} physical buffers (soft limit {}), queued {} oldest recoverable buffers (target {}), Android trim level {}; never evict unbacked guest data",
+                self.live_gpu_buffer_count, GPU_BUFFER_SOFT_LIMIT, self.eviction_pending.len(), GPU_BUFFER_SWEEP_GOAL, pressure
             ));
         }
         for _ in 0..GPU_EVICT_PER_FRAME {
