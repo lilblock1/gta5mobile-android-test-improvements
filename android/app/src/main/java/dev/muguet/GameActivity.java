@@ -21,6 +21,7 @@ import java.util.HashSet;
 public final class GameActivity extends NativeActivity implements InputManagerCompat.Listener {
     static { System.loadLibrary("muguet"); }
     private static native void nativeMemoryPressure(int level);
+    private static native void nativeThermalLevel(int status);
     static native void nativeInput(String[] keys, int buttons, boolean horn, boolean controller);
     static native void nativeLook(float dx, float dy);
     static native boolean nativeInVehicle();
@@ -347,6 +348,8 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
     // a clock comparison; JNI, text layout, and formatting run once per second.
     private void updateFps(long now) {
         if (fpsAt != 0 && now - fpsAt < 1_000_000_000L) return;
+        int thermalLevel = thermalStatus.level();
+        nativeThermalLevel(thermalLevel);
         long[] stats = nativePerfStats();
         if (stats == null || stats.length < PerformanceHud.STATS_COUNT) return;
         if (fpsAt == 0) {
@@ -361,7 +364,7 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
         fpsAt = now;
         fpsFrames = stats[0];
         skippedAt = stats[5];
-        if (fpsText != null) fpsText.setText(PerformanceHud.format(fps, stats, skipped, seconds, thermalStatus.read()));
+        if (fpsText != null) fpsText.setText(PerformanceHud.format(fps, stats, skipped, seconds, ThermalStatus.label(thermalLevel)));
         sampleProcessRam();
     }
 }
