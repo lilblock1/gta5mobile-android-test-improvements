@@ -42,6 +42,7 @@ public final class EngineActivity extends Activity {
 
     // JNI (registered natively via RegisterNatives).
     private static native void nativeMemoryPressure(int level);
+    private static native void nativeThermalLevel(int status);
     private static native int nativeRegister();
     private static native boolean nativeCacheActivity(Object activity);
     private static native void nativeSetHeapMb(int mb);
@@ -403,6 +404,8 @@ public final class EngineActivity extends Activity {
         long now = System.nanoTime();
         // Do not call JNI or update TextView until a full second has elapsed.
         if (fpsAt != 0 && now - fpsAt < 1_000_000_000L) return;
+        int thermalLevel = thermalStatus.level();
+        nativeThermalLevel(thermalLevel);
         long[] stats = nativePerfStats();
         if (stats == null || stats.length < PerformanceHud.STATS_COUNT) return;
         if (fpsAt == 0) {
@@ -418,7 +421,7 @@ public final class EngineActivity extends Activity {
         fpsFrames = stats[0];
         skippedAt = stats[5];
         lastFps = (long) fps;
-        if (fpsText != null) fpsText.setText(PerformanceHud.format(fps, stats, skipped, seconds, thermalStatus.read()));
+        if (fpsText != null) fpsText.setText(PerformanceHud.format(fps, stats, skipped, seconds, ThermalStatus.label(thermalLevel)));
     }
 
     // --- lifecycle -----------------------------------------------------------
