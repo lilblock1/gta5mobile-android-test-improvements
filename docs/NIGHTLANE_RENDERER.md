@@ -28,14 +28,34 @@
 
 ## Current user option
 
-Launcher > Settings > **Nightlane Android output filter (experimental)**:
+Launcher > Settings > **Nightlane graphics reconstruction**:
 
-- **Native — original, fastest baseline (default):** original single
-  `textureLoad` per output pixel.
-- **Smooth — four-tap display reconstruction:** samples four neighboring input
-  texels and interpolates them; it may reduce visible pixelation when internal
-  render scale is below the phone's display size. It can also soften detail and
-  increase texture bandwidth. It is *not* FSR, TAA, or a new texture/shadow pass.
+- **Native (default):** unmodified single `textureLoad` final surface shader.
+- **Smooth:** four neighboring source texels per output pixel with interpolation.
+- **Sharp:** the same four texture loads plus bounded contrast-adaptive RGB
+  sharpening. Additional sharpening math has a nonzero but unmeasured GPU
+  cost; Gentle/Balanced/Strong controls compile-time shader strength.
+  **Not** AMD FSR/EASU/CAS or TAA; no motion vectors, increased geometry
+  quality or proprietary game textures are introduced.
+
+Other Android-only, experimental user settings:
+
+- **Thermal FPS protection (default on):** Java reads Android's temperature
+  **severity status** once per second and forwards it to Rust. Renderer FPS
+  ceiling changes to 42 at Severe, 30 at Critical, 24 at Emergency and higher.
+  A user-defined lower FPS cap is preserved. This can increase frame times
+  and cannot guarantee lower temperatures; actual effect needs device tests.
+- **LOD mode (default Performance):** Performance retains original zero-LOD
+  phone profile; Balanced raises world/ped/vehicle to 0.25/0.10/0.10;
+  Detailed raises them to 0.45/0.20/0.20. Engine defaults disables the
+  automatic phone LOD XML override; explicit graphics overrides may remain.
+  Changes apply at launch, not live. The flat building in the screenshot
+  might also indicate a rendering bug; LOD is only one possible cause.
+- **Touch HUD (default Compact):** the primary PAUSE, MORE, CAM and WEAPON
+  toolbar sits below the tutorial region. MORE temporarily exposes PHONE,
+  SWITCH, RADIO/COVER, LOOK BACK/CROUCH, and navigation actions.
+  Button size and opacity have separate saved options.
+
 
 The Wasmtime launch path loads `nightlane_present` from `config.json` into
 `NIGHTLANE_PRESENT` via `src/config.rs`. The native wasm2c engine-core
@@ -64,8 +84,12 @@ experimental. Unknown values fall back to Native.
 - Build `cargo test --lib` on Linux and the Android APK GitHub Actions job.
 - Verify actual shader/pipeline creation on the phone (Rust-only compilation
   is **not** proof the WGSL filter works on the Vulkan driver).
-- Launch with Native and Smooth from the same save/location, render scale and
-  frame cap. Check 1% lows, average FPS, image sharpness and input latency.
+- Compare Native, Smooth and Sharp at the same save/location, render scale
+  and frame cap. Check 1% lows, average FPS, softness/ringing and latency.
+- Check Java -> JNI thermal status from Normal through Severe using on-device
+  reported status; do not simulate unsafe heat conditions just for testing.
+- Compare Performance and Balanced LOD draw calls; stop if heat, CPU stalls or
+  missing textures increase. Verify the compact HUD still allows every action.
 - Drive through previously troublesome areas for 15-20 minutes and compare
   exported logs: freezes, RAM PSS, GPU buffer/texture counts and cache restores.
 - Test app suspend/resume, switching back to Native, and device rotation.
