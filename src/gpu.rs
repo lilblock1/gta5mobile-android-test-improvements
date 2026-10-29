@@ -4050,17 +4050,18 @@ impl Gpu {
                 }
             }
             if self.blit.is_none() {
-                let module = self.device.create_shader_module(ShaderModuleDescriptor { label: Some("blit"), source: ShaderSource::Wgsl(
-                    "@group(0) @binding(0) var src: texture_2d<f32>;
-                     struct VOut { @builtin(position) position: vec4f, @location(0) uv: vec2f }
-                     @vertex fn vs(@builtin(vertex_index) i: u32) -> VOut {
-                         var p = array<vec2f, 3>(vec2f(-1, -1), vec2f(3, -1), vec2f(-1, 3));
-                         var o: VOut; o.position = vec4f(p[i], 0, 1); o.uv = p[i] * vec2f(0.5, -0.5) + vec2f(0.5); return o;
-                     }
-                     @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
-                         let size = vec2i(textureDimensions(src));
-                         return textureLoad(src, clamp(vec2i(uv * vec2f(size)), vec2i(0), size - vec2i(1)), 0);
-                     }".into()) });
+                // Nightlane Android presentation backend (phase 1): select one
+                // shader at device initialization. The default uses the original
+                // one-tap path; smooth mode performs four-tap reconstruction in
+                // the existing present pass with no extra GPU allocations.
+                let filter = crate::nightlane_render::PresentFilter::current();
+                log(&format!("nightlane renderer: output filter {} (single-pass, fallback native)",
+                    filter.name()));
+                let source = crate::nightlane_render::shader_source(filter);
+                let module = self.device.create_shader_module(ShaderModuleDescriptor {
+                    label: Some("Nightlane surface presentation"),
+                    source: ShaderSource::Wgsl(source.into()),
+                });
                 self.blit = Some(self.simple_pipeline(&module, Some(self.surface_format), None));
             }
             let blit = self.blit.clone().unwrap();
