@@ -42,6 +42,18 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
 
     // Respond to Android memory pressure without touching game files or forcing GC.
     // The Rust renderer owns Vulkan allocations; Android cannot safely evict them.
+    private long lastRamSampleAt;
+    private void sampleProcessRam() {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (now - lastRamSampleAt < 10000) return;
+        lastRamSampleAt = now;
+        android.os.Debug.MemoryInfo info = new android.os.Debug.MemoryInfo();
+        android.os.Debug.getMemoryInfo(info);
+        hudLog("ram: pss=" + info.getTotalPss() + " KiB privateDirty="
+            + info.getTotalPrivateDirty() + " KiB sharedDirty="
+            + info.getTotalSharedDirty() + " KiB nativeHeapAllocated="
+            + (android.os.Debug.getNativeHeapAllocatedSize() >> 10) + " KiB");
+    }
     private long lastMemoryWarningAt;
     @Override public void onTrimMemory(int level) {
         super.onTrimMemory(level);
@@ -350,5 +362,6 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
         fpsFrames = stats[0];
         skippedAt = stats[5];
         if (fpsText != null) fpsText.setText(PerformanceHud.format(fps, stats, skipped, seconds, thermalStatus.read()));
+        sampleProcessRam();
     }
 }
