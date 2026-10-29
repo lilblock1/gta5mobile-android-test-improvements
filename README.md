@@ -69,12 +69,32 @@ when that happens.
 
 ### Graphics
 
-Nightlane's **experimental Android presentation filter** is selectable in
-launcher Settings: **Native** (original single-pixel display) or **Smooth**
-(four-tap bilinear reconstruction at the same internal rendering resolution).
-Native remains the default and fallback. This is only the **first step** of
-the custom Android renderer; no performance or image-quality gains are claimed
-without device benchmarks. See [renderer roadmap](docs/NIGHTLANE_RENDERER.md).
+Nightlane Android's **experimental graphics and thermal controls** are
+available in the launcher Settings:
+
+- **Native / Smooth / Sharp:** Native preserves original output (default);
+  Smooth reduces pixelation; Sharp adds contrast-adaptive sharpening using the
+  same four texture loads. The Gentle, Balanced and Strong sharpening presets
+  do **not** implement AMD FSR, TAA or higher-resolution game textures.
+- **Adaptive thermal protection:** enabled by default. The Android thermal
+  service's *severity* signal (not Celsius) limits rendering to **42 FPS at
+  Severe**, **30 FPS at Critical**, **24 FPS at Emergency or worse**. It
+  never raises a player's existing lower FPS cap. Can be disabled in Settings.
+- **Distant-detail profiles:** Performance preserves the previous lowest LOD
+  behavior by default; Balanced and Detailed raise LOD modestly, including
+  overriding Low-preset `-lodScale` flags. Higher LOD may increase draw calls
+  and heat. Engine defaults removes the automatic phone LOD pin but may still
+  be affected by other user graphics settings. This does not repair missing
+  shader assets or texture-data errors.
+- **Compact touch HUD:** reduced-size, subtler controls and a secondary
+  **MORE** menu by default; adjustable button size/opacity in Settings.
+  Existing full-layout option remains available.
+
+These are **AI-assisted experimental enhancements** to the existing wgpu
+Vulkan renderer, *not* a completed independent Vulkan game engine. APK build,
+driver-side shader validation, image quality, RAM, FPS and thermal gains
+must still be verified on a physical Android device.
+See [renderer roadmap](docs/NIGHTLANE_RENDERER.md).
 
 Every graphics knob the web launcher exposes is in the launcher, under
 **Graphics**, with the same names, plus Low / Engine default / Max presets.
