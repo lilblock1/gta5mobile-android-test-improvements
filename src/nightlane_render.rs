@@ -11,12 +11,14 @@
 pub(crate) enum PresentFilter {
     Native,
     Smooth,
+    Sharp,
 }
 
 impl PresentFilter {
     pub(crate) fn from_setting(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "smooth" => Self::Smooth,
+            "sharp" => Self::Sharp,
             _ => Self::Native,
         }
     }
@@ -33,6 +35,7 @@ impl PresentFilter {
         match self {
             Self::Native => "native-nearest",
             Self::Smooth => "android-smooth-4tap",
+            Self::Sharp => "android-sharp-adaptive-4tap",
         }
     }
 }
@@ -81,12 +84,40 @@ const SMOOTH_FRAGMENT: &str = r#"
 }
 "#;
 
+// Four-tap contrast-adaptive reconstruction. Uses the same four loads as
+// Smooth; adds only scalar arithmetic and constrains sharpening to the texels'
+// local color range to avoid bright ringing and amplified aliasing.
+// Inspired by inexpensive reconstruction filters, NOT AMD FSR/EASU/CAS.
+const SHARP_FRAGMENT: &str = r#"
+@fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+    let size = vec2i(textureDimensions(src));
+    let last = size - vec2i(1);
+    let position = uv * vec2f(size) - vec2f(0.5);
+    let base = vec2i(floor(position));
+    let fraction = fract(position);
+    let a = textureLoad(src, clamp(base, vec2i(0), last), 0);
+    let b = textureLoad(src, clamp(base + vec2i(1, 0), vec2i(0), last), 0);
+    let c = textureLoad(src, clamp(base + vec2i(0, 1), vec2i(0), last), 0);
+    let d = textureLoad(src, clamp(base + vec2i(1, 1), vec2i(0), last), 0);
+    let interpolated = mix(mix(a, b, fraction.x), mix(c, d, fraction.x), fraction.y);
+    let low = min(min(a.rgb, b.rgb), min(c.rgb, d.rgb));
+    let high = max(max(a.rgb, b.rgb), max(c.rgb, d.rgb));
+    let range = high - low;
+    let contrast = max(max(range.r, range.g), range.b);
+    let gain = 0.30 * (1.0 - clamp(contrast, 0.0, 1.0));
+    let average = (a.rgb + b.rgb + c.rgb + d.rgb) * 0.25;
+    let sharpened = clamp(interpolated.rgb + gain * (interpolated.rgb - average), low, high);
+    return vec4f(sharpened, interpolated.a);
+}
+"#;
+
 // Build only the selected shader once per renderer/device. No per-frame shader
 // compilation or dynamic pipeline toggles are introduced.
 pub(crate) fn shader_source(filter: PresentFilter) -> String {
     let fragment = match filter {
         PresentFilter::Native => NATIVE_FRAGMENT,
         PresentFilter::Smooth => SMOOTH_FRAGMENT,
+        PresentFilter::Sharp => SHARP_FRAGMENT,
     };
     let mut source = String::with_capacity(VERTEX.len() + fragment.len() + 1);
     source.push_str(VERTEX);
@@ -105,11 +136,12 @@ mod tests {
         assert_eq!(PresentFilter::from_setting("unexpected"), PresentFilter::Native);
         assert_eq!(PresentFilter::from_setting(" native "), PresentFilter::Native);
         assert_eq!(PresentFilter::from_setting("SMOOTH"), PresentFilter::Smooth);
+        assert_eq!(PresentFilter::from_setting("SHARP"), PresentFilter::Sharp);
     }
 
     #[test]
     fn both_shader_paths_keep_the_same_surface_contract() {
-        for filter in [PresentFilter::Native, PresentFilter::Smooth] {
+        for filter in [PresentFilter::Native, PresentFilter::Smooth, PresentFilter::Sharp] {
             let shader = shader_source(filter);
             assert!(shader.contains("@vertex fn vs"));
             assert!(shader.contains("@fragment fn fs"));
@@ -139,5 +171,8 @@ mod tests {
         assert_eq!(shader.matches("textureLoad(src").count(), 4);
         assert!(shader.contains("clamp("));
         assert!(!shader.contains("textureSample("));
+        let sharp = shader_source(PresentFilter::Sharp);
+        assert_eq!(sharp.matches("textureLoad(src").count(), 4);
+        assert!(sharp.contains("let sharpened = clamp("));
     }
 }
