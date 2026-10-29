@@ -189,6 +189,7 @@ public final class LauncherActivity extends Activity {
     private TextView folderStatus;
     private ProgressBar progress;
     private Spinner mode, heap, streamingBudget;
+    private Spinner nightlanePresent;
     private static final double[] STREAMING_BUDGETS = {0.35, 0.25, 0.15};
     private EditText scale, name, magnetField, relayUrl, relayRoom, relayKey;
     private CheckBox mute, multiplayer, cpuBc, softwareClip;
@@ -468,6 +469,9 @@ public final class LauncherActivity extends Activity {
         softwareClip = check(column, "Force software clip distances (Adreno turns this on by itself)", settings.optBoolean("gpu_software_clip", false));
         scale = field(column, "Render scale (0.25–1.0)", Double.toString(settings.optDouble("scale", 0.5)));
         scale.setInputType(android.text.InputType.TYPE_CLASS_NUMBER | android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        nightlanePresent = choice(column, "Nightlane Android output filter (experimental)",
+            new String[]{"Native — original, fastest baseline", "Smooth — four-tap display reconstruction"},
+            "smooth".equalsIgnoreCase(settings.optString("nightlane_present", "native")) ? 1 : 0);
         mute = check(column, "Mute audio", settings.optBoolean("mute", false));
         multiplayer = check(column, "Multiplayer (Grand-V relay, not GTA Online)", settings.optBoolean("multiplayer", false));
         // The relay is run by whoever hosts the session; you need its address, the
@@ -657,6 +661,8 @@ public final class LauncherActivity extends Activity {
             settings.put("extra_args", graphicsArgs());
             settings.put("gpu_cpu_bc", cpuBc.isChecked());
             settings.put("gpu_software_clip", softwareClip.isChecked());
+            settings.put("nightlane_present",
+                nightlanePresent.getSelectedItemPosition() == 1 ? "smooth" : "native");
             settings.put("fullscreen", true);
             settings.put("mute", mute.isChecked());
             settings.put("multiplayer", multiplayer.isChecked());
