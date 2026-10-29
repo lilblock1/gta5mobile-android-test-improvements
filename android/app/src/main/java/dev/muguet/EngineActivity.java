@@ -41,6 +41,7 @@ public final class EngineActivity extends Activity {
     }
 
     // JNI (registered natively via RegisterNatives).
+    private static native void nativeMemoryPressure(int level);
     private static native int nativeRegister();
     private static native boolean nativeCacheActivity(Object activity);
     private static native void nativeSetHeapMb(int mb);
@@ -75,6 +76,17 @@ public final class EngineActivity extends Activity {
     private float accLookX, accLookY;
     private long fpsAt, fpsFrames, skippedAt, lastFps;
     private String statusMessage = "Starting engine…";
+
+    private long lastMemoryWarningAt;
+    @Override public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        if (level < android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) return;
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (now - lastMemoryWarningAt < 10000) return;
+        lastMemoryWarningAt = now;
+        nativeMemoryPressure(level);
+        Log.i("Muguet", "[memory] Android trim level " + level + " forwarded to renderer");
+    }
 
     @Override public void onCreate(Bundle state) {
         // Initialize the Vulkan proxy in this process before native rendering.
