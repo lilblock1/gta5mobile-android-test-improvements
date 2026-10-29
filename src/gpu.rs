@@ -1554,6 +1554,12 @@ impl Gpu {
         let pressure = MEMORY_PRESSURE.swap(0, Ordering::Relaxed);
         let under_pressure = pressure >= 10;
         let scan_interval = if under_pressure { 60 } else { 300 };
+        // Preserve a callback until the scan cooldown expires.
+        if under_pressure && self.eviction_pending.is_empty()
+            && self.presents.saturating_sub(self.eviction_last_scan_frame) < scan_interval
+        {
+            MEMORY_PRESSURE.fetch_max(pressure, Ordering::Relaxed);
+        }
         if self.eviction_pending.is_empty()
             && (under_pressure || self.live_gpu_buffer_count > GPU_BUFFER_SOFT_LIMIT)
             && self.presents.saturating_sub(self.eviction_last_scan_frame) >= scan_interval
