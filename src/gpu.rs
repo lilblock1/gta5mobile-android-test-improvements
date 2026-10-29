@@ -148,6 +148,38 @@ pub static PRESENTS: AtomicU64 = AtomicU64::new(0);
  // from the Java callback; the request is consumed during frame presentation.
 static MEMORY_PRESSURE: AtomicI32 = AtomicI32::new(0);
 
+// Updated by the Android thermal service at HUD cadence (1 Hz). This is an
+// Android *severity level*, not Celsius, and does not touch Vulkan on Java UI.
+static THERMAL_LEVEL: AtomicI32 = AtomicI32::new(-1);
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_dev_muguet_GameActivity_nativeThermalLevel(
+    _env: *mut std::ffi::c_void, _class: *mut std::ffi::c_void, level: i32,
+) {
+    THERMAL_LEVEL.store(level, Ordering::Relaxed);
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_dev_muguet_EngineActivity_nativeThermalLevel(
+    _env: *mut std::ffi::c_void, _class: *mut std::ffi::c_void, level: i32,
+) {
+    THERMAL_LEVEL.store(level, Ordering::Relaxed);
+}
+
+// Android ThermalStatus constants: SEVERE=3, CRITICAL=4, EMERGENCY=5.
+// A cap lowers peak CPU/GPU work; it cannot guarantee a cool device.
+fn thermal_fps_limit(severity: i32) -> Option<u32> {
+    match severity {
+        5.. => Some(24),
+        4 => Some(30),
+        3 => Some(42),
+        _ => None,
+    }
+}
+
+
 #[cfg(target_os = "android")]
 #[no_mangle]
 pub extern "system" fn Java_dev_muguet_GameActivity_nativeMemoryPressure(
@@ -1134,6 +1166,8 @@ pub struct Gpu {
     // Android-only low-CPU frame pacing for launcher FPS values (24/30/42).
     frame_pace: Option<Duration>,
     frame_due: Option<Instant>,
+    thermal_adaptive: bool,
+    thermal_last_cap: Option<u32>,
     enc: Option<CommandEncoder>,
     enc_epoch: u64,
     pass: Option<RenderPass<'static>>,
@@ -1388,6 +1422,9 @@ impl Gpu {
             evicted_buffers: 0, restored_buffers: 0, eviction_last_scan_frame: 0,
             eviction_pending: VecDeque::new(), hud_last_sample: Instant::now(),
             frame_pace, frame_due: None,
+            thermal_adaptive: cfg!(target_os = "android")
+                && std::env::var("NIGHTLANE_THERMAL_ADAPTIVE").unwrap_or_default() != "0",
+            thermal_last_cap: None,
             enc: None, enc_epoch: 1, pass: None, pass_key: None, pass_info: None, pass_st: PassSt::default(),
             s: State::new(), pdirty: true, last_pl: None, shader_index, shader_dir, next_uid: 1,
             bgl_cache: HashMap::new(), empty_bgl: None, pipelines: HashMap::new(),
@@ -4148,7 +4185,27 @@ impl Gpu {
     // burning a CPU core. If GPU work takes longer than the frame budget,
     // resynchronize rather than trying to "catch up" with burst frames.
     fn pace_frame(&mut self) {
-        let Some(period) = self.frame_pace else { return };
+        let mut period = self.frame_pace;
+        if self.thermal_adaptive {
+            let level = THERMAL_LEVEL.load(Ordering::Relaxed);
+            let cap = thermal_fps_limit(level);
+            if cap != self.thermal_last_cap {
+                log(&format!("nightlane thermal pacing: Android status {} => {}",
+                    level, cap.map(|fps| format!("{fps} FPS maximum"))
+                        .unwrap_or_else(|| "launcher FPS setting".to_string())));
+                self.thermal_last_cap = cap;
+                self.frame_due = None; // reset deadlines when the cap changes
+            }
+            if let Some(fps) = cap {
+                let safe_period = Duration::from_secs_f64(1.0 / f64::from(fps));
+                // Never exceed the player's existing limit, only reduce it.
+                period = Some(period.map_or(safe_period, |requested| requested.max(safe_period)));
+            }
+        }
+        let Some(period) = period else {
+            self.frame_due = None;
+            return;
+        };
         let now = Instant::now();
         let deadline = self.frame_due.unwrap_or(now);
         if deadline > now {
@@ -4387,6 +4444,16 @@ fn resource_cold(frame: u64, born: u64, last_used: Option<u64>, threshold: u64) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thermal_caps_never_raise_the_game_fps() {
+        assert_eq!(thermal_fps_limit(-1), None);
+        assert_eq!(thermal_fps_limit(0), None);
+        assert_eq!(thermal_fps_limit(2), None);
+        assert_eq!(thermal_fps_limit(3), Some(42));
+        assert_eq!(thermal_fps_limit(4), Some(30));
+        assert_eq!(thermal_fps_limit(5), Some(24));
+    }
 
     #[test]
     fn buffer_recovery_eligibility_is_strict() {
