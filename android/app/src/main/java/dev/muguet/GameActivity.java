@@ -20,6 +20,7 @@ import java.util.HashSet;
 // NativeActivity hosts winit/Vulkan; Android views provide the touch HUD.
 public final class GameActivity extends NativeActivity implements InputManagerCompat.Listener {
     static { System.loadLibrary("muguet"); }
+    private static native void nativeMemoryPressure(int level);
     static native void nativeInput(String[] keys, int buttons, boolean horn, boolean controller);
     static native void nativeLook(float dx, float dy);
     static native boolean nativeInVehicle();
@@ -49,6 +50,7 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
         long now = android.os.SystemClock.elapsedRealtime();
         if (now - lastMemoryWarningAt < 10000) return;
         lastMemoryWarningAt = now;
+        nativeMemoryPressure(level);
         android.app.ActivityManager manager =
             (android.app.ActivityManager) getSystemService(ACTIVITY_SERVICE);
         android.app.ActivityManager.MemoryInfo info = new android.app.ActivityManager.MemoryInfo();
