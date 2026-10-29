@@ -4235,6 +4235,30 @@ impl Gpu {
                     _ => (len, cap, declared),
                 }
             });
+            // Count retained CPU copies separately from Vulkan allocations.
+            // These backups cannot be discarded while a buffer is eligible for
+            // rehydration after eviction; the report identifies actual RAM cost.
+            let (backup_count, backup_len, backup_capacity, zero_backups) =
+                self.objs.iter().fold((0u64, 0u64, 0u64, 0u64), |acc, obj| {
+                    match obj {
+                        Some(Obj::Buf(b)) => {
+                            let (count, len, capacity, zeros) = acc;
+                            match b.restore_data.as_ref() {
+                                Some(data) => (count + 1, len + data.len() as u64,
+                                    capacity + data.capacity() as u64, zeros),
+                                None => (count, len, capacity,
+                                    zeros + u64::from(b.restore_zero)),
+                            }
+                        }
+                        _ => acc,
+                    }
+                });
+            log(&format!(
+                "cpu ram copies: {} buffer backups {} KiB used / {} KiB allocated (tracked {} KiB), {} zero-only buffers without byte copies; {} KiB shadow allocated; {} KiB combined backup+shadow capacity",
+                backup_count, backup_len >> 10, backup_capacity >> 10,
+                self.restore_data_bytes >> 10, zero_backups, shadow_capacity >> 10,
+                backup_capacity.saturating_add(shadow_capacity) >> 10
+            ));
             let uniform_staging: usize = self.ubo_slots.iter().flatten().map(|c| c.stage.capacity()).sum();
             log(&format!("host buffer memory: shadow data {} KiB, allocated {} KiB, declared {} KiB; uniform staging {} KiB; bind group cache {}/{} ({} evictions)",
                 shadow_len >> 10, shadow_capacity >> 10, shadow_declared >> 10, uniform_staging >> 10,
