@@ -140,9 +140,19 @@ for the server.
 
 The [Nightlane WorldStream roadmap](docs/NIGHTLANE_WORLDSTREAM.md) describes
 an incremental, experimental path toward improved file I/O, bounded read-ahead,
-RAM budgeting, and (only if feasible) geographic asset streaming. It is
-**a plan, not an implemented replacement**. The existing game streamer remains
-the baseline and every stage must pass tests before the next is attempted.
+RAM budgeting, and (only if feasible) geographic asset streaming.
+
+**Phase 0 code is implemented, with CI and phone verification pending.** In
+Settings, `WorldStream backend` now offers **Original (default)** or
+**Experimental (reserved; currently uses Original)**. The reserved option
+cannot alter asset loading yet: the game continues to use its original I/O
+path and memory rules. The native Wasmtime I/O worker records aggregate
+`[worldstream-baseline]` measurements roughly every 10 seconds, with build,
+graphics/heap settings and device metadata elsewhere in the exported log.
+
+Use the [Phase 0 baseline test report](docs/WORLDSTREAM_PHASE0_BASELINE.md)
+to record repeatable runs on Android, then review CI and real gameplay results
+before starting Phase 1. No speedup is claimed or expected from Phase 0.
 
 ### Native engine core
 
