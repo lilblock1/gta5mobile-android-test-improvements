@@ -1,24 +1,43 @@
-# BytArch GTA-V
+# Nightlane Android
 
-A native port of the GTA V web build. The game ships as WebAssembly; this throws
-the browser layer away and runs the same `game.wasm` as an ordinary native app —
-[wasmtime](https://wasmtime.dev) for the code, [wgpu](https://wgpu.rs) on Vulkan
-for Android and Metal on Apple platforms.
+> **UNOFFICIAL, AI-ASSISTED FORK — NOT THE ORIGINAL GRAND V PROJECT.**
+> Nightlane Android is an independent experimental fork of the
+> [BytArch GTA-V Android port](https://github.com/bytarch/gta5mobile-android),
+> which adapts the Grand V web game. The fork adds Android-specific fixes,
+> diagnostics, performance work and experimental graphics improvements developed
+> **with AI assistance**. Original code and upstream work are not claimed as ours.
+> **Not affiliated with Rockstar Games or any original project authors.**
 
-Unofficial. No game content is included: you bring your own copy of the web
-port's data.
+This project retains upstream author notices, source-code history and its
+**GPL-3.0-or-later** license. Credit includes the original web-port developers,
+BytArch's Android-port contributors, Constantin Clerc (c22dev) / muguet portions,
+and the [gta5-ios-port](https://github.com/kevinerikjs/gta5-ios-port)
+engine-core work where incorporated. Consult the source history for detailed
+authorship. AI-assisted changes require review and testing like any other code.
+
+Nightlane runs user-supplied web-port game data through the existing WebAssembly
+runtime ([Wasmtime](https://wasmtime.dev)) and a Rust [wgpu](https://wgpu.rs)
+renderer using Vulkan on Android (Metal on Apple platforms). The renderer is
+being optimized **incrementally** for Android; it is **not yet a fully rewritten
+native Vulkan engine**. The original presentation path remains available.
+
+**No proprietary game content is included.** Users provide compatible legally
+obtained game data. This is experimental software; compatibility, FPS,
+graphics improvements and device stability are not guaranteed.
 
 - **Android (working target)** — ARM64, Android 10+, Vulkan. See below.
 - **iOS / macOS** — Metal, JIT on macOS, AOT on iOS. Build scripts at the bottom.
 
 ## Android
 
-**Download:** [BytArch GTA-V for Android 0.1.12-patch](https://github.com/bytarch/gta5mobile-android/releases/tag/android-0.1.12-patch)
-- `BytArch-GTA-V-android-0.1.12-patch-debug.apk`, arm64-v8a, Android 10+, debug
-  signed (sideloading only). Sideload it, or `adb install -r` over an older copy.
+**Experimental builds:** Download `Nightlane-Android-arm64-experimental-debug`
+from the [Nightlane Android CI runs](https://github.com/lilblock1/gta5mobile-android-test-improvements/actions/workflows/android.yml)
+**only after a successful build**. ARM64, Android 10+, Vulkan; debug-signed and
+sideloaded. GitHub Actions currently uses a runner debug key unless a persistent
+signing keystore is configured; in that case, upgrading an older installation
+may require matching its certificate or backing up saves before reinstalling.
 
-Push to `main` and GitHub Actions builds an APK; the `Muguet-Android-arm64-debug`
-artifact appears on the completed run. Locally: `sh make-android.sh` or
+Push to `main` and GitHub Actions builds the APK. Locally: `sh make-android.sh` or
 `.\make-android.ps1`, output at
 `android/app/build/outputs/apk/debug/app-debug.apk`.
 
@@ -49,6 +68,13 @@ looks like — so the launcher offers **Grant file access** ("All files access")
 when that happens.
 
 ### Graphics
+
+Nightlane's **experimental Android presentation filter** is selectable in
+launcher Settings: **Native** (original single-pixel display) or **Smooth**
+(four-tap bilinear reconstruction at the same internal rendering resolution).
+Native remains the default and fallback. This is only the **first step** of
+the custom Android renderer; no performance or image-quality gains are claimed
+without device benchmarks. See [renderer roadmap](docs/NIGHTLANE_RENDERER.md).
 
 Every graphics knob the web launcher exposes is in the launcher, under
 **Graphics**, with the same names, plus Low / Engine default / Max presets.
@@ -155,7 +181,8 @@ vendor/         patched wgpu-core and the wasm2c bridge
 
 ## Reporting bugs
 
-- Issue tracker: https://github.com/bytarch/gta5mobile-android/issues
+- Nightlane issue tracker: https://github.com/lilblock1/gta5mobile-android-test-improvements/issues
+- Original BytArch port issues: https://github.com/bytarch/gta5mobile-android/issues
 - Direct contact: https://x.com/MikeJohndlvl
 
 The launcher has both links at the bottom of its screen. Include your phone
@@ -164,7 +191,11 @@ model, Android version and Vulkan driver, plus the exported logs from the
 
 ## Legal
 
-This repository contains no game assets. Users supply their own copy of the
-web port's data, and this project neither hosts nor distributes it.
+This repository contains no game assets. Users supply their own legitimately
+obtained web-port data; this project neither hosts nor distributes it.
+
+Nightlane is an AI-assisted modified fork, not the official Grand V, GTA V, or
+BytArch Android release. Upstream copyright notices remain in their files.
+The GPL-3.0-or-later license remains applicable to this modified source.
 
 Contributions welcome.
