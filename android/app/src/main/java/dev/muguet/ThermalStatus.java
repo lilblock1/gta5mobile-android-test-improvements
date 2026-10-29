@@ -13,15 +13,17 @@ final class ThermalStatus {
         power = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
     }
 
-    String read() {
-        if (power == null) return "Unknown";
+    int level() {
+        if (power == null) return -1;
         try {
-            return label(power.getCurrentThermalStatus());
+            return power.getCurrentThermalStatus();
         } catch (RuntimeException | LinkageError unavailable) {
-            // Some vendor builds do not supply the Android thermal service.
-            return "Unknown";
+            // Unknown must not trigger an invented temperature or FPS cap.
+            return -1;
         }
     }
+
+    String read() { return label(level()); }
 
     static String label(int status) {
         switch (status) {
