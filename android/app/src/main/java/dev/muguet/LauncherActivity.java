@@ -260,13 +260,13 @@ public final class LauncherActivity extends Activity {
         });
         setContentView(scroll);
         TextView title = new TextView(this);
-        title.setText("GRAND V");
+        title.setText("NIGHTLANE");
         title.setTextSize(32);
         title.setTypeface(android.graphics.Typeface.create("sans-serif-black", android.graphics.Typeface.BOLD));
         title.setLetterSpacing(0.08f);
         column.addView(title);
         TextView subtitle = new TextView(this);
-        subtitle.setText("ANDROID  /  EXPERIMENTAL");
+        subtitle.setText("AI-ASSISTED FORK  /  ANDROID");
         subtitle.setTextSize(12);
         subtitle.setLetterSpacing(0.15f);
         subtitle.setTextColor(0xFF70D8FF);
@@ -349,7 +349,7 @@ public final class LauncherActivity extends Activity {
             try {
                 startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
                     Uri.parse("package:" + getPackageName())));
-            } catch (Exception e) { status.setText("Grant 'All files access' to Grand V Android Test in Settings > Apps > Special access."); }
+            } catch (Exception e) { status.setText("Grant 'All files access' to Nightlane Android in Settings > Apps > Special access."); }
         });
         column.addView(grantAccessButton);
         // The engine writes saves into app-private storage (MUGUET_FSROOT), which
@@ -512,16 +512,20 @@ public final class LauncherActivity extends Activity {
         // Bug reports go to the project issue tracker; the social link reaches the
         // author directly. Both open in the browser, never inside the app.
         TextView support = new TextView(this);
-        support.setText("Found a bug? Report it on GitHub, or contact the author on X (Twitter).");
+        support.setText("Nightlane Android is an unofficial, AI-assisted fork. Based on Grand V and the BytArch Android port (GPL-3.0-or-later). This project is not affiliated with Rockstar Games or the original creators. Original copyright notices and source history remain intact.");
         column.addView(support);
         Button reportBug = new Button(this);
-        reportBug.setText("Report a bug on GitHub");
-        reportBug.setOnClickListener(v -> openUrl("https://github.com/bytarch/gta5mobile-android"));
+        reportBug.setText("Report a Nightlane bug on GitHub");
+        reportBug.setOnClickListener(v -> openUrl("https://github.com/lilblock1/gta5mobile-android-test-improvements/issues"));
         column.addView(reportBug);
         Button contactAuthor = new Button(this);
-        contactAuthor.setText("Contact on X (Twitter)");
+        contactAuthor.setText("Original port author (X)");
         contactAuthor.setOnClickListener(v -> openUrl("https://x.com/MikeJohndlvl"));
         column.addView(contactAuthor);
+        Button upstreamProject = new Button(this);
+        upstreamProject.setText("View original BytArch port");
+        upstreamProject.setOnClickListener(v -> openUrl("https://github.com/bytarch/gta5mobile-android"));
+        column.addView(upstreamProject);
         ready();
         organizeLauncher(column, title, subtitle, warning, importButton, graphicsHeader, play, support);
     }
@@ -544,7 +548,7 @@ public final class LauncherActivity extends Activity {
         root.addView(subtitle);
 
         TextView tagline = new TextView(this);
-        tagline.setText("Your game. Your settings. One place.");
+        tagline.setText("Unofficial fork of Grand V and the BytArch Android port.\nIndependent AI-assisted improvements; original creators credited.");
         tagline.setTextColor(0xFF9BACBF);
         tagline.setTextSize(14);
         root.addView(tagline);
@@ -573,7 +577,7 @@ public final class LauncherActivity extends Activity {
         // Play is the primary action, ahead of diagnostics and advanced options.
         if (play instanceof Button) {
             Button primary = (Button) play;
-            primary.setText("PLAY GRAND V");
+            primary.setText("PLAY WITH NIGHTLANE");
             primary.setBackground(rounded(0xFF007FBB, 0xFF40C9FF));
             primary.setMinHeight(dp(60));
         }
@@ -1037,7 +1041,7 @@ public final class LauncherActivity extends Activity {
         return out;
     }
     private void error(Exception e) {
-        if (!isFinishing() && !isDestroyed()) new AlertDialog.Builder(this).setTitle("Grand V Android").setMessage(e.getMessage()).setPositiveButton("OK", null).show();
+        if (!isFinishing() && !isDestroyed()) new AlertDialog.Builder(this).setTitle("Nightlane Android").setMessage(e.getMessage()).setPositiveButton("OK", null).show();
     }
     // Called by Rust on the import worker, never directly updates UI there.
     public void importProgress(long done, long total) {
