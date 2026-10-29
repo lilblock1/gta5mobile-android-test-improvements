@@ -7,7 +7,7 @@ use std::fs::File;
 use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use wasmtime::SharedMemory;
 
 static STARTED: AtomicBool = AtomicBool::new(false);
@@ -49,6 +49,18 @@ pub fn start(mem: &SharedMemory, table: u64) {
 fn serve_loop(mem: SharedMemory, table: u64) {
     let files = manifest_files();
     let root = data_dir();
+    let worldstream = crate::worldstream::Selection::from_environment();
+    eprintln!("{}", worldstream.log_line());
+    eprintln!(
+        "[worldstream-baseline] phase=0 io=original manifest_file_count={} max_open_handles={} interval_seconds=10",
+        files.len(), MAX_OPEN,
+    );
+    // This is an observation-only baseline. The read results, open-handle LRU
+    // and producer/consumer synchronization below are intentionally unchanged.
+    let mut last_report = Instant::now();
+    let mut last_report_reads = 0u64;
+    let mut last_report_bytes = 0u64;
+    let mut read_errors = 0u64;
     // Keep the most recently read files open. Eviction scans only happen
     // when the cache is full, never on the common streaming-read path.
     let mut handles: HashMap<i32, (File, u64)> = HashMap::new();
@@ -115,6 +127,7 @@ fn serve_loop(mem: SharedMemory, table: u64) {
                 }
             };
             served += 1;
+            if result < 0 { read_errors += 1; }
             if result > 0 { bytes += result as u64; }
             if served % 2000 == 0 {
                 eprintln!("[io] {served} reads, {} MB, {} open handles, {} opens, {} evictions", bytes >> 20, handles.len(), opened, evictions);
@@ -124,6 +137,21 @@ fn serve_loop(mem: SharedMemory, table: u64) {
             let _ = mem.atomic_notify(w, 1);
         }
 
+        // Phase 0 summary runs only on the already-dedicated I/O worker.
+        // It adds no per-file logs, extra disk reads or resident byte cache.
+        if last_report.elapsed() >= Duration::from_secs(10) {
+            let elapsed_ms = last_report.elapsed().as_millis();
+            eprintln!(
+                "[worldstream-baseline] phase=0 mode={} interval_ms={} reads={} bytes={} total_reads={} total_bytes={} open_handles={} opens={} handle_evictions={} read_errors={}",
+                worldstream.active.name(), elapsed_ms,
+                served.saturating_sub(last_report_reads),
+                bytes.saturating_sub(last_report_bytes),
+                served, bytes, handles.len(), opened, evictions, read_errors,
+            );
+            last_report = Instant::now();
+            last_report_reads = served;
+            last_report_bytes = bytes;
+        }
         let _ = mem.atomic_wait32(table, seen as u32, Some(Duration::from_millis(20)));
     }
 }
