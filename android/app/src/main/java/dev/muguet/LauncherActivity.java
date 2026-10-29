@@ -189,7 +189,7 @@ public final class LauncherActivity extends Activity {
     private TextView folderStatus;
     private ProgressBar progress;
     private Spinner mode, heap, streamingBudget;
-    private Spinner nightlanePresent, nightlaneLod, nightlaneHudSize, nightlaneHudOpacity;
+    private Spinner nightlanePresent, nightlaneSharpness, nightlaneLod, nightlaneHudSize, nightlaneHudOpacity;
     private CheckBox nightlaneThermal, nightlaneCompactHud;
     private static final double[] STREAMING_BUDGETS = {0.35, 0.25, 0.15};
     private EditText scale, name, magnetField, relayUrl, relayRoom, relayKey;
@@ -474,6 +474,10 @@ public final class LauncherActivity extends Activity {
         nightlanePresent = choice(column, "Nightlane graphics reconstruction (experimental)",
             new String[]{"Native — original", "Smooth — less pixelation", "Sharp — adaptive edge/detail boost"},
             "sharp".equalsIgnoreCase(presentMode) ? 2 : "smooth".equalsIgnoreCase(presentMode) ? 1 : 0);
+        double selectedSharpness = settings.optDouble("nightlane_sharpness", 0.30);
+        nightlaneSharpness = choice(column, "Sharpen strength (applies only to Sharp mode)",
+            new String[]{"Gentle", "Balanced", "Strong"}, 
+            selectedSharpness >= 0.40 ? 2 : selectedSharpness >= 0.225 ? 1 : 0);
         String lodMode = settings.optString("nightlane_lod", "performance");
         nightlaneLod = choice(column, "Nightlane distant scene detail (may affect FPS)",
             new String[]{"Performance — existing lowest LOD", "Balanced — slightly more distant detail",
@@ -686,6 +690,8 @@ public final class LauncherActivity extends Activity {
                 : nightlanePresent.getSelectedItemPosition() == 1 ? "smooth" : "native");
             settings.put("nightlane_lod",
                 new String[]{"performance", "balanced", "detail", "original"}[nightlaneLod.getSelectedItemPosition()]);
+            settings.put("nightlane_sharpness",
+                new double[]{0.15, 0.30, 0.45}[nightlaneSharpness.getSelectedItemPosition()]);
             settings.put("nightlane_thermal_adaptive", nightlaneThermal.isChecked());
             settings.put("nightlane_compact_hud", nightlaneCompactHud.isChecked());
             settings.put("nightlane_hud_scale",
