@@ -241,6 +241,12 @@ fn settings(cfg_path: &Path) -> Vec<String> {
         // BC decoder is a diagnostic for the texture uploads.
         if flag("gpu_cpu_bc") { set_default("MUGUET_GPU_CPU_BC", "1"); }
         if flag("gpu_software_clip") { set_default("MUGUET_GPU_SOFTWARE_CLIP", "1"); }
+        // Nightlane's experimental output filter is applied only to the final
+        // Vulkan presentation shader. Unknown values fall back to native.
+        let nightlane_filter = cfg.get("nightlane_present")
+            .and_then(|v| v.as_str()).unwrap_or("native");
+        set_default("NIGHTLANE_PRESENT",
+            if nightlane_filter.eq_ignore_ascii_case("smooth") { "smooth" } else { "native" });
     }
 
     let text = |k: &str| cfg.get(k).and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty());
