@@ -189,7 +189,8 @@ public final class LauncherActivity extends Activity {
     private TextView folderStatus;
     private ProgressBar progress;
     private Spinner mode, heap, streamingBudget;
-    private Spinner nightlanePresent;
+    private Spinner nightlanePresent, nightlaneLod, nightlaneHudSize, nightlaneHudOpacity;
+    private CheckBox nightlaneThermal, nightlaneCompactHud;
     private static final double[] STREAMING_BUDGETS = {0.35, 0.25, 0.15};
     private EditText scale, name, magnetField, relayUrl, relayRoom, relayKey;
     private CheckBox mute, multiplayer, cpuBc, softwareClip;
@@ -469,9 +470,28 @@ public final class LauncherActivity extends Activity {
         softwareClip = check(column, "Force software clip distances (Adreno turns this on by itself)", settings.optBoolean("gpu_software_clip", false));
         scale = field(column, "Render scale (0.25–1.0)", Double.toString(settings.optDouble("scale", 0.5)));
         scale.setInputType(android.text.InputType.TYPE_CLASS_NUMBER | android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL);
-        nightlanePresent = choice(column, "Nightlane Android output filter (experimental)",
-            new String[]{"Native — original, fastest baseline", "Smooth — four-tap display reconstruction"},
-            "smooth".equalsIgnoreCase(settings.optString("nightlane_present", "native")) ? 1 : 0);
+        String presentMode = settings.optString("nightlane_present", "native");
+        nightlanePresent = choice(column, "Nightlane graphics reconstruction (experimental)",
+            new String[]{"Native — original", "Smooth — less pixelation", "Sharp — adaptive edge/detail boost"},
+            "sharp".equalsIgnoreCase(presentMode) ? 2 : "smooth".equalsIgnoreCase(presentMode) ? 1 : 0);
+        String lodMode = settings.optString("nightlane_lod", "performance");
+        nightlaneLod = choice(column, "Nightlane distant scene detail (may affect FPS)",
+            new String[]{"Performance — existing lowest LOD", "Balanced — slightly more distant detail",
+                "Detailed — more distant objects (heavier)", "Engine defaults — turn off phone LOD override"},
+            "original".equals(lodMode) ? 3 : "detail".equals(lodMode) ? 2 :
+                "balanced".equals(lodMode) ? 1 : 0);
+        nightlaneThermal = check(column, "Adaptive thermal FPS protection (Severe 42 / Critical 30 / Emergency 24)",
+            settings.optBoolean("nightlane_thermal_adaptive", true));
+        nightlaneCompactHud = check(column, "Compact touch HUD — group secondary buttons under MORE",
+            settings.optBoolean("nightlane_compact_hud", true));
+        double savedHudScale = settings.optDouble("nightlane_hud_scale", 0.85);
+        nightlaneHudSize = choice(column, "Touch HUD button size",
+            new String[]{"Compact — 85%", "Normal — 100%", "Large — 115%"},
+            savedHudScale >= 1.075 ? 2 : savedHudScale >= 0.925 ? 1 : 0);
+        double savedHudOpacity = settings.optDouble("nightlane_hud_opacity", 0.16);
+        nightlaneHudOpacity = choice(column, "Touch HUD opacity",
+            new String[]{"Subtle — 16%", "Normal — 24%", "High contrast — 36%"},
+            savedHudOpacity >= 0.30 ? 2 : savedHudOpacity >= 0.20 ? 1 : 0);
         mute = check(column, "Mute audio", settings.optBoolean("mute", false));
         multiplayer = check(column, "Multiplayer (Grand-V relay, not GTA Online)", settings.optBoolean("multiplayer", false));
         // The relay is run by whoever hosts the session; you need its address, the
@@ -662,7 +682,16 @@ public final class LauncherActivity extends Activity {
             settings.put("gpu_cpu_bc", cpuBc.isChecked());
             settings.put("gpu_software_clip", softwareClip.isChecked());
             settings.put("nightlane_present",
-                nightlanePresent.getSelectedItemPosition() == 1 ? "smooth" : "native");
+                nightlanePresent.getSelectedItemPosition() == 2 ? "sharp"
+                : nightlanePresent.getSelectedItemPosition() == 1 ? "smooth" : "native");
+            settings.put("nightlane_lod",
+                new String[]{"performance", "balanced", "detail", "original"}[nightlaneLod.getSelectedItemPosition()]);
+            settings.put("nightlane_thermal_adaptive", nightlaneThermal.isChecked());
+            settings.put("nightlane_compact_hud", nightlaneCompactHud.isChecked());
+            settings.put("nightlane_hud_scale",
+                new double[]{0.85, 1.0, 1.15}[nightlaneHudSize.getSelectedItemPosition()]);
+            settings.put("nightlane_hud_opacity",
+                new double[]{0.16, 0.24, 0.36}[nightlaneHudOpacity.getSelectedItemPosition()]);
             settings.put("fullscreen", true);
             settings.put("mute", mute.isChecked());
             settings.put("multiplayer", multiplayer.isChecked());
