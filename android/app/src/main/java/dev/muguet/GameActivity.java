@@ -105,6 +105,13 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
         // activity window and still forwards keys/touch to the game where the HUD
         // does not consume them. No overlay permission is required for a sub-window.
         attachHud();
+        // Device identity for comparison runs; not a temperature sensor reading.
+        // Rust writes the build SHA, streaming settings and 10-second I/O
+        // counters separately to this same exported log.
+        hudLog("worldstream-baseline device=" + android.os.Build.MANUFACTURER
+            + "/" + android.os.Build.MODEL + " android_api="
+            + android.os.Build.VERSION.SDK_INT + " android_release="
+            + android.os.Build.VERSION.RELEASE + " game_path=wasmtime");
     }
 
     private FrameLayout overlay;
