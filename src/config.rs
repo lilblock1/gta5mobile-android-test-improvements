@@ -334,6 +334,26 @@ fn settings(cfg_path: &Path) -> Vec<String> {
     }).map(|a| String::from(*a)));
     let lod_profile = cfg.get("nightlane_lod").and_then(|v| v.as_str())
         .unwrap_or("performance");
+    // The low graphics preset also sends explicit -lodScale=0 args, which
+    // override settings.xml. For a *selected* Nightlane LOD profile, replace
+    // those three flags too or the user would see no difference.
+    if phone_lod {
+        let values = match lod_profile {
+            "balanced" => Some([0.25, 0.10, 0.10]),
+            "detail" => Some([0.45, 0.20, 0.20]),
+            _ => None,
+        };
+        if let Some(values) = values {
+            let names = ["-lodScale", "-pedLodBias", "-vehicleLodBias"];
+            engine_args.retain(|arg| !names.iter().any(|name| {
+                arg == name || arg.starts_with(&format!("{name}="))
+            }));
+            for (name, value) in names.iter().zip(values) {
+                engine_args.push(format!("{name}={value:.2}"));
+            }
+            eprintln!("[nightlane] {} distant-detail profile applied to engine flags", lod_profile);
+        }
+    }
     fix_settings(num("texture_quality").map(|q| q as i64), phone_graphics,
         phone_lod && lod_profile != "original", lod_profile);
     engine_args
