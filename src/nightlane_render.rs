@@ -119,6 +119,21 @@ mod tests {
     }
 
     #[test]
+    fn both_present_shaders_parse_and_validate_as_wgsl() {
+        for filter in [PresentFilter::Native, PresentFilter::Smooth] {
+            let source = shader_source(filter);
+            let module = wgpu::naga::front::wgsl::parse_str(&source)
+                .unwrap_or_else(|error| panic!("{}", error.emit_to_string(&source)));
+            wgpu::naga::valid::Validator::new(
+                wgpu::naga::valid::ValidationFlags::all(),
+                wgpu::naga::valid::Capabilities::empty(),
+            )
+                .validate(&module)
+                .unwrap_or_else(|error| panic!("{}", error.emit_to_string(&source)));
+        }
+    }
+
+    #[test]
     fn smooth_path_is_clamped_and_needs_no_extra_texture() {
         let shader = shader_source(PresentFilter::Smooth);
         assert_eq!(shader.matches("textureLoad(src").count(), 4);
