@@ -111,24 +111,44 @@ const SHARP_FRAGMENT: &str = r#"
 }
 "#;
 
-// Build only the selected shader once per renderer/device. No per-frame shader
-// compilation or dynamic pipeline toggles are introduced.
+// Clamp the build-time sharpness; invalid values cannot inject WGSL.
+fn clamped_sharpness(value: f32) -> f32 {
+    if value.is_finite() { value.clamp(0.0, 0.50) } else { 0.30 }
+}
+
+// Build only the selected shader once per renderer/device. Sharpness is
+// inserted as a sanitized numeric literal, so it needs no per-frame uniform
+// update, separate render pass or extra texture reads.
 pub(crate) fn shader_source(filter: PresentFilter) -> String {
-    let fragment = match filter {
-        PresentFilter::Native => NATIVE_FRAGMENT,
-        PresentFilter::Smooth => SMOOTH_FRAGMENT,
-        PresentFilter::Sharp => SHARP_FRAGMENT,
+    let source_fragment = match filter {
+        PresentFilter::Native => NATIVE_FRAGMENT.to_string(),
+        PresentFilter::Smooth => SMOOTH_FRAGMENT.to_string(),
+        PresentFilter::Sharp => {
+            let requested = std::env::var("NIGHTLANE_SHARPNESS").ok()
+                .and_then(|text| text.parse::<f32>().ok()).unwrap_or(0.30);
+            let strength = clamped_sharpness(requested);
+            SHARP_FRAGMENT.replace("let gain = 0.30 *",
+                &format!("let gain = {strength:.3} *"))
+        }
     };
-    let mut source = String::with_capacity(VERTEX.len() + fragment.len() + 1);
+    let mut source = String::with_capacity(VERTEX.len() + source_fragment.len() + 1);
     source.push_str(VERTEX);
     source.push('\n');
-    source.push_str(fragment);
+    source.push_str(&source_fragment);
     source
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sharpening_strength_is_bounded_and_stable() {
+        assert_eq!(clamped_sharpness(-10.0), 0.0);
+        assert_eq!(clamped_sharpness(0.30), 0.30);
+        assert_eq!(clamped_sharpness(9.0), 0.50);
+        assert_eq!(clamped_sharpness(f32::NAN), 0.30);
+    }
 
     #[test]
     fn unknown_modes_use_original_renderer() {
