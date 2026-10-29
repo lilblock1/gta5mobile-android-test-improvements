@@ -251,6 +251,9 @@ fn settings(cfg_path: &Path) -> Vec<String> {
             _ => "native",
         };
         set_default("NIGHTLANE_PRESENT", filtered);
+        let sharpness = cfg.get("nightlane_sharpness").and_then(|v| v.as_f64()).unwrap_or(0.30);
+        let sharpness = if sharpness.is_finite() { sharpness.clamp(0.0, 0.50) } else { 0.30 };
+        set_default("NIGHTLANE_SHARPNESS", format!("{sharpness:.3}"));
         set_default("NIGHTLANE_THERMAL_ADAPTIVE",
             if cfg.get("nightlane_thermal_adaptive").and_then(|v| v.as_bool())
                 .unwrap_or(true) { "1" } else { "0" });
