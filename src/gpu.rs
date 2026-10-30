@@ -364,6 +364,10 @@ fn log(s: &str) {
 static WATCHDOG_PRESENT_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
 static WATCHDOG_LAST_PRESENT_MS: AtomicU64 = AtomicU64::new(0);
 static WATCHDOG_LAST_GPU_TICK_MS: AtomicU64 = AtomicU64::new(0);
+static WATCHDOG_RING_HEAD: AtomicU64 = AtomicU64::new(0);
+static WATCHDOG_RING_TAIL: AtomicU64 = AtomicU64::new(0);
+static WATCHDOG_INFLIGHT: AtomicU64 = AtomicU64::new(0);
+static WATCHDOG_LAST_OPCODE: AtomicU64 = AtomicU64::new(0);
 static WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
 static WATCHDOG_ORIGIN: LazyLock<Instant> = LazyLock::new(Instant::now);
 fn watchdog_ms() -> u64 { WATCHDOG_ORIGIN.elapsed().as_millis() as u64 }
@@ -384,7 +388,11 @@ fn watchdog_present_attempt() {
                 let gpu_age = now.saturating_sub(WATCHDOG_LAST_GPU_TICK_MS.load(Ordering::Relaxed));
                 let count = WATCHDOG_PRESENT_ATTEMPTS.load(Ordering::Relaxed);
                 let movie_events = crate::host::movie_diagnostics_snapshot();
-                let report = format!("[nightlane-freeze] no_present_attempt_ms={present_age} gpu_loop_last_tick_ms={gpu_age} present_attempts={count} suspended=false occluded=false movie_events={movie_events:?} diagnostic_only=true");
+                let ring_head = WATCHDOG_RING_HEAD.load(Ordering::Relaxed);
+                let ring_tail = WATCHDOG_RING_TAIL.load(Ordering::Relaxed);
+                let inflight = WATCHDOG_INFLIGHT.load(Ordering::Relaxed);
+                let last_opcode = WATCHDOG_LAST_OPCODE.load(Ordering::Relaxed);
+                let report = format!("[nightlane-freeze] no_present_attempt_ms={present_age} gpu_loop_last_tick_ms={gpu_age} present_attempts={count} suspended=false occluded=false movie_events={movie_events:?} ring_head={ring_head} ring_tail={ring_tail} gpu_inflight={inflight} last_opcode={last_opcode} diagnostic_only=true");
                 eprintln!("{report}");
                 // Persistent app-private report for later log export; best effort only.
                 if let Ok(root) = std::env::var("MUGUET_DATA") {
@@ -1822,6 +1830,9 @@ impl Gpu {
                 let _ = self.device.poll(PollType::Poll);
             }
             let head = self.hdr(0).load(Ordering::SeqCst);
+            WATCHDOG_RING_HEAD.store(head as u32 as u64, Ordering::Relaxed);
+            WATCHDOG_RING_TAIL.store(tail as u32 as u64, Ordering::Relaxed);
+            WATCHDOG_INFLIGHT.store(self.inflight.load(Ordering::Relaxed) as u64, Ordering::Relaxed);
             if head == tail {
                 if !self.pending_events.is_empty() || !self.pending_resolve.is_empty() {
                     self.flush();
@@ -1849,6 +1860,7 @@ impl Gpu {
         while tail != head {
             let base = ring_w + (tail as u64 >> 2);
             let op = self.u(base);
+            WATCHDOG_LAST_OPCODE.store(op as u64, Ordering::Relaxed);
             let n = self.u(base + 1) as u64;
             if op == 1 {
                 tail = RING_DATA as i32;
