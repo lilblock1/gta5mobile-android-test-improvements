@@ -383,7 +383,8 @@ fn watchdog_present_attempt() {
                 last_reported = now;
                 let gpu_age = now.saturating_sub(WATCHDOG_LAST_GPU_TICK_MS.load(Ordering::Relaxed));
                 let count = WATCHDOG_PRESENT_ATTEMPTS.load(Ordering::Relaxed);
-                let report = format!("[nightlane-freeze] no_present_attempt_ms={present_age} gpu_loop_last_tick_ms={gpu_age} present_attempts={count} suspended=false occluded=false diagnostic_only=true");
+                let movie_events = crate::host::movie_diagnostics_snapshot();
+                let report = format!("[nightlane-freeze] no_present_attempt_ms={present_age} gpu_loop_last_tick_ms={gpu_age} present_attempts={count} suspended=false occluded=false movie_events={movie_events:?} diagnostic_only=true");
                 eprintln!("{report}");
                 // Persistent app-private report for later log export; best effort only.
                 if let Ok(root) = std::env::var("MUGUET_DATA") {
