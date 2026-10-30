@@ -62,9 +62,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "$KEYSTORE" ]; then
-            echo "::warning::No ANDROID_KEYSTORE_B64 secret. The APK will carry the runner's"
-            echo "::warning::throwaway debug key and cannot upgrade an already installed copy."
-            exit 0
+            echo "::error::ANDROID_KEYSTORE_B64 is not configured. Refusing to publish an APK signed with a throwaway CI key; configure a persistent signing key first."
+            exit 1
           fi
           printf '%s' "$KEYSTORE" | base64 -d > "$RUNNER_TEMP/keystore.jks"
           echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/keystore.jks" >> "$GITHUB_ENV"
