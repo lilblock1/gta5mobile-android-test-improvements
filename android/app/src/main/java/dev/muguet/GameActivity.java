@@ -48,6 +48,7 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
     private void sampleProcessRam() {
         long now = android.os.SystemClock.elapsedRealtime();
         if (now - lastRamSampleAt < 10000) return;
+        sampleMemoryPressure();
         lastRamSampleAt = now;
         android.os.Debug.MemoryInfo info = new android.os.Debug.MemoryInfo();
         android.os.Debug.getMemoryInfo(info);
@@ -55,6 +56,29 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
             + info.getTotalPrivateDirty() + " KiB sharedDirty="
             + info.getTotalSharedDirty() + " KiB nativeHeapAllocated="
             + (android.os.Debug.getNativeHeapAllocatedSize() >> 10) + " KiB");
+    }
+    // Early warning only: the native renderer decides whether GPU resources are safe to evict.
+    // Hysteresis and a cooldown avoid repeatedly requesting cleanup during normal gameplay.
+    private long lastProactivePressureAt;
+    private boolean proactivePressureArmed = true;
+    private void sampleMemoryPressure() {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (now - lastRamSampleAt < 10000) return;
+        android.app.ActivityManager manager =
+            (android.app.ActivityManager) getSystemService(ACTIVITY_SERVICE);
+        if (manager == null) return;
+        android.app.ActivityManager.MemoryInfo system = new android.app.ActivityManager.MemoryInfo();
+        manager.getMemoryInfo(system);
+        long availableMb = system.availMem / (1024L * 1024L);
+        if (availableMb > 1800) proactivePressureArmed = true;
+        if (proactivePressureArmed && availableMb < 1100
+                && now - lastProactivePressureAt > 30000) {
+            proactivePressureArmed = false;
+            lastProactivePressureAt = now;
+            nativeMemoryPressure(android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW);
+            hudLog("early memory pressure: available=" + availableMb
+                + "MB; requested native cache trim (GPU release not confirmed)");
+        }
     }
     private long lastMemoryWarningAt;
     @Override public void onTrimMemory(int level) {
