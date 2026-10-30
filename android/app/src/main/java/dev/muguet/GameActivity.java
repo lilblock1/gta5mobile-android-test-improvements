@@ -34,6 +34,7 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
     private TouchControls controls;
     private TextView status, fpsText;
     private ThermalStatus thermalStatus;
+    private Phase0Telemetry phase0Telemetry;
     private InputManagerCompat devices;
     private boolean active, focused, controller, inCar;
     private float lx, ly, rx, ry, lt, rt, hx, hy;
@@ -84,6 +85,7 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
         }
         super.onCreate(state);
         thermalStatus = new ThermalStatus(this);
+        phase0Telemetry = new Phase0Telemetry(this);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
@@ -373,5 +375,6 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
         skippedAt = stats[5];
         if (fpsText != null) fpsText.setText(PerformanceHud.format(fps, stats, skipped, seconds, ThermalStatus.label(thermalLevel)));
         sampleProcessRam();
+        if (phase0Telemetry != null) phase0Telemetry.sample();
     }
 }
