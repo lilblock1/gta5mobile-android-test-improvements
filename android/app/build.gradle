@@ -10,8 +10,8 @@ android {
         applicationId 'dev.muguet.test'
         minSdk 29
         targetSdk 36
-        versionCode 6
-        versionName '0.1.5-nightlane-worldstream-phase0'
+        versionCode 7
+        versionName '0.1.6-nightlane-worldstream-phase1'
         ndk { abiFilters 'arm64-v8a' }
     }
     compileOptions {
