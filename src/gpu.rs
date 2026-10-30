@@ -359,6 +359,42 @@ fn log(s: &str) {
     eprintln!("[wgpu] {s}");
 }
 
+// Phase 1 diagnostic-only watchdog. It never changes GPU scheduling or aborts the game.
+// A present *attempt* is not proof that the frame reached the screen.
+static WATCHDOG_PRESENT_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+static WATCHDOG_LAST_PRESENT_MS: AtomicU64 = AtomicU64::new(0);
+static WATCHDOG_LAST_GPU_TICK_MS: AtomicU64 = AtomicU64::new(0);
+static WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
+static WATCHDOG_ORIGIN: LazyLock<Instant> = LazyLock::new(Instant::now);
+fn watchdog_ms() -> u64 { WATCHDOG_ORIGIN.elapsed().as_millis() as u64 }
+fn watchdog_tick() { WATCHDOG_LAST_GPU_TICK_MS.store(watchdog_ms(), Ordering::Relaxed); }
+fn watchdog_present_attempt() {
+    WATCHDOG_PRESENT_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+    WATCHDOG_LAST_PRESENT_MS.store(watchdog_ms(), Ordering::Relaxed);
+    if !WATCHDOG_STARTED.swap(true, Ordering::SeqCst) {
+        std::thread::Builder::new().name("nightlane-freeze-watchdog".into()).spawn(|| {
+            let mut last_reported = 0;
+            loop {
+                std::thread::sleep(Duration::from_secs(2));
+                if SUSPENDED.load(Ordering::Relaxed) || OCCLUDED.load(Ordering::Relaxed) { continue; }
+                let now = watchdog_ms();
+                let present_age = now.saturating_sub(WATCHDOG_LAST_PRESENT_MS.load(Ordering::Relaxed));
+                if present_age < 10_000 || now.saturating_sub(last_reported) < 30_000 { continue; }
+                last_reported = now;
+                let gpu_age = now.saturating_sub(WATCHDOG_LAST_GPU_TICK_MS.load(Ordering::Relaxed));
+                let count = WATCHDOG_PRESENT_ATTEMPTS.load(Ordering::Relaxed);
+                let report = format!("[nightlane-freeze] no_present_attempt_ms={present_age} gpu_loop_last_tick_ms={gpu_age} present_attempts={count} suspended=false occluded=false diagnostic_only=true");
+                eprintln!("{report}");
+                // Persistent app-private report for later log export; best effort only.
+                if let Ok(root) = std::env::var("MUGUET_DATA") {
+                    let path = std::path::Path::new(&root).join("nightlane-freeze-report.txt");
+                    let _ = std::fs::write(path, format!("{report}\n"));
+                }
+            }
+        }).ok();
+    }
+}
+
 fn drain_forever(mem: &dyn RingMem, ring: u64) -> ! {
     let a = |w: u64| mem.word(ring + 4 * w);
     a(2).store(2, Ordering::SeqCst);
@@ -1732,6 +1768,7 @@ impl Gpu {
         self.hdr(2).store(1, Ordering::SeqCst);
         log("running");
         loop {
+            watchdog_tick();
             #[cfg(target_os = "android")]
             if let Some(reply) = SURFACE_RELEASE.lock().unwrap().take() {
                 self.flush();
@@ -4039,6 +4076,7 @@ impl Gpu {
     }
 
     fn present(&mut self, id: u32) {
+        watchdog_present_attempt();
         if self.lost.load(Ordering::SeqCst) {
             self.flush();
             self.collect_pipelines();
