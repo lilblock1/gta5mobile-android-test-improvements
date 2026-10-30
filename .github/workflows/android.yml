@@ -2,7 +2,7 @@ name: Nightlane Android experimental APK
 
 on:
   push:
-    branches: [main]
+    branches: [main, phase1-world-streaming]
   pull_request:
   workflow_dispatch:
 
