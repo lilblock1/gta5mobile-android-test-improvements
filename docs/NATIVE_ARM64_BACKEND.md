@@ -37,9 +37,12 @@ startup, rendering, story, pause/menu, save, and thermal test.
    builds a separate opt-in **dual-runtime** test APK, using the same verified
    `engine-resources/` snapshot already present in this repo. The normal
    Android build workflow is unchanged.
-4. **Native import coverage:** The generated import report is inspected.
-   Unimplemented native imports fail the experimental build rather than
-   producing an APK whose native button has no usable engine.
+4. **Native import coverage:** The first wasm2c run generated 256 C files
+   and passed the exact game-function-body patch checks, but found 10
+   missing `env.__syscall_*` socket imports. These now explicitly return
+   `-52` (unsupported) like the **existing Wasmtime host**. Network
+   operations do not pretend to succeed; all **other** missing native imports
+   still abort the experimental build rather than yielding a misleading APK.
 5. **APK check:** The test APK must contain
    `lib/arm64-v8a/libgta5engine.so` **and**
    `lib/arm64-v8a/libmuguet.so`, plus the verified shaders.
