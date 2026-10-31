@@ -115,3 +115,66 @@ interface before trying to call or emulate it.
 
 No automatic movie skip, synthetic completion, hidden checkpoint restore,
 auto-restart, or rewrite of saved assets is introduced.
+
+
+## Real-device result: Logs3.7z — 2026-10-31
+
+**Input:** a 7z archive containing one exported `Logs3.txt` with ~158,228
+lines across **six appended game sessions**. The final session is the first
+one using the structured `[nightlane-movie-trace]` checkpoints. The raw
+archive is **not** committed to GitHub.
+
+- The final session used the Galaxy S25+, Turnip Mesa 27.0.0-devel and a
+  30-FPS frame cap. The game displayed a still frame during the stall.
+- `[nightlane-movie-trace-host] candidate_imports=0` — no imported
+  WASM function name explicitly contained movie/Bink/cutscene/video. This
+  doesn't rule out anonymous/internal game functions or a host timing bug.
+- The earlier `ARMENIAN_3_INT_SEQ` intro recorded
+  `audio_prepare → audio_activated → audio_ready → scene_created →
+  cutscene_state=8 → state=4 → state=13 → audio_stop → state=7 →
+  state=8 → cutscene_stopped → cutscene_unloaded`. Raw engine lines
+  also show **Cutscene Audio Play** for this successful intro.
+- ~123.6 seconds later, `ARMENIAN_3_MCS_3` recorded
+  `audio_event → audio_prepare → audio_activated → audio_ready →
+  scene_created`, with no new cutscene state transition before the hang.
+  This ordering is a **loss of visible progress**, not direct proof a
+  specific missing completion callback caused it.
+- Immediately afterward the engine emitted `ARM3_WINDOW` and
+  `CTVChannelInfo::SetDirty(true)` activity, then ceased meaningful
+  frame presentation. The presence of TV/Scaleform signals doesn't
+  prove they caused the stall: previous sessions show them too.
+- `[nightlane-freeze]` first reported >10 seconds since a present
+  attempt; later reports exceeded 40 and 70 seconds. The rendering
+  thread waited for main, which remained at
+  `100% Update>Render Update>Movie Manager [sleep]`.
+- The low-rate I/O worker continued ~7 reads per 10 seconds,
+  `read_errors=0`, `slow_reads_50ms=0`, `max_pending_slots=1`
+  in the stalled window. That does not support an asset-read bottleneck.
+- PSS was ~7.4 GiB during the final stall. Two `LOW_MEMORY` exits
+  appear in the *historical* Android exit list, not as a confirmed
+  immediate cause of this final user-initiated recovery.
+- The read-only stall detector fired and the user manually returned to
+  the launcher. This confirmed the recovery UI path again, not mission
+  completion or save integrity.
+- Repeated movie sleeps appear across multiple attempts and GPU drivers;
+  an exclusively Vulkan-driver-specific failure is less likely.
+
+### Diagnostic improvement from this log
+
+The raw engine output includes `Cutscene Audio Play` for the **successful
+intro** but no corresponding Play log for the stalled `MCS_3` segment.
+The trace initially recorded only audio_ready, not audio_play. The
+diagnostic now records **`audio_play` explicitly**, resets the
+`last_audio_play_observed` field on each new audio event, and adds
+`since_last_stage_ms` to the freeze snapshot. Importantly, absence
+of a line in the log is **not** proof no internal playback happened.
+
+### Next decision
+
+Before a native movie-skip or retry-state patch, identify the engine
+interface responsible for (1) starting the MCS_3 cutscene after audio
+preparation, (2) waking the main game thread from Movie Manager sleep,
+and (3) finishing/advancing that cutscene. The current Wasmtime host
+does not expose named movie/cutscene imports. A safe remedy must preserve
+scene, script, audio and collision consistency. Continue manual recovery
+as the only supported fallback in experimental APKs.
