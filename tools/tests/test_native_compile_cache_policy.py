@@ -53,7 +53,7 @@ class NativeCompileCachePolicyTest(unittest.TestCase):
         self.assertIn("steps.native_c_cache.outputs.cache-primary-key", self.workflow)
 
     def test_partial_compiles_can_be_saved_without_publishing_failed_apks(self):
-        timeouts = re.findall(r"^        timeout-minutes: (\\d+)$", self.workflow, re.M)
+        timeouts = re.findall(r"^        timeout-minutes: (\d+)$", self.workflow, re.M)
         self.assertEqual(len(timeouts), 1, "Native build step needs an explicit timeout")
         self.assertTrue(60 <= int(timeouts[0]) <= 180, "Compile timeout must leave time to persist ccache")
         self.assertIn("if: always() && steps.native_c_cache.outcome == 'success'", self.workflow)
