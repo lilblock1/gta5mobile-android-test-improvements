@@ -188,7 +188,7 @@ public final class LauncherActivity extends Activity {
     private Button play, playEngine, importButton, clearFolderButton, grantAccessButton;
     private TextView folderStatus;
     private ProgressBar progress;
-    private Spinner mode, heap, streamingBudget, worldstreamMode;
+    private Spinner mode, heap, streamingBudget, worldstreamMode, msaaMode;
     private Spinner nightlanePresent, nightlaneSharpness, nightlaneLod, nightlaneHudSize, nightlaneHudOpacity;
     private CheckBox nightlaneThermal, nightlaneCompactHud;
     private static final double[] STREAMING_BUDGETS = {0.35, 0.25, 0.15};
@@ -198,6 +198,9 @@ public final class LauncherActivity extends Activity {
     private TextView sensitivityLabel;
     private JSONObject settings;
     private boolean importing;
+    private final AtomicBoolean cancelDownload = new AtomicBoolean();
+    private boolean downloading;
+    private Button pauseDownload;
 
     private int dp(int value) {
         return (int) (value * getResources().getDisplayMetrics().density + 0.5f);
@@ -481,6 +484,10 @@ public final class LauncherActivity extends Activity {
         softwareClip = check(column, "Force software clip distances (Adreno turns this on by itself)", settings.optBoolean("gpu_software_clip", false));
         scale = field(column, "Render scale (0.25–1.0)", Double.toString(settings.optDouble("scale", 0.5)));
         scale.setInputType(android.text.InputType.TYPE_CLASS_NUMBER | android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        String savedMsaa = settings.optString("android_msaa_mode", "default");
+        msaaMode = choice(column, "Wasmtime anti-aliasing (lower uses less GPU memory; edges may look rougher)",
+            new String[]{"Up to 2x — current default", "Adaptive — 1x at low scale or on devices with 6 GB RAM or less", "1x — MSAA off"},
+            "adaptive".equals(savedMsaa) ? 1 : "off".equals(savedMsaa) ? 2 : 0);
         String presentMode = settings.optString("nightlane_present", "native");
         nightlanePresent = choice(column, "Nightlane graphics reconstruction (experimental)",
             new String[]{"Native — original", "Smooth — less pixelation", "Sharp — adaptive edge/detail boost"},
@@ -538,6 +545,15 @@ public final class LauncherActivity extends Activity {
         play = new Button(this);
         play.setText("Play (wasmtime engine)");
         play.setOnClickListener(v -> launch(GameActivity.class));
+        pauseDownload = new Button(this);
+        pauseDownload.setText("Pause download");
+        pauseDownload.setVisibility(android.view.View.GONE);
+        pauseDownload.setOnClickListener(v -> {
+            cancelDownload.set(true);
+            pauseDownload.setEnabled(false);
+            status.setText("Pausing download…");
+        });
+        column.addView(pauseDownload);
         column.addView(play);
         playEngine = new Button(this);
         playEngine.setText("Play (native wasm2c engine)");
@@ -688,6 +704,7 @@ public final class LauncherActivity extends Activity {
             double renderScale = Double.parseDouble(scale.getText().toString());
             if (!Double.isFinite(renderScale) || renderScale < 0.25 || renderScale > 1) throw new IllegalArgumentException("Render scale must be between 0.25 and 1.0");
             settings.put("scale", renderScale);
+            settings.put("android_msaa_mode", new String[]{"default", "adaptive", "off"}[msaaMode.getSelectedItemPosition()]);
             settings.put("start_mode", mode.getSelectedItemPosition() + 1);
             settings.put("android_heap_gb", heap.getSelectedItemPosition() + 3);
             settings.put("streamer_percentage", STREAMING_BUDGETS[streamingBudget.getSelectedItemPosition()]);
@@ -723,6 +740,15 @@ public final class LauncherActivity extends Activity {
             settings.put("last_magnet", magnetField.getText().toString().trim());
             settings.put("touch_sensitivity", LookSensitivity.fromSlider(sensitivity.getProgress()));
             saveSettings();
+            if (!nativePrepare(getFilesDir().getAbsolutePath())) {
+                String selectedFolder = folderPath();
+                if (selectedFolder == null || !selectedFolder.isEmpty()) {
+                    status.setText("Selected game folder is incomplete or unreadable. Pick a compatible folder or use the downloaded copy.");
+                    return;
+                }
+                installOnFirstPlay(activity);
+                return;
+            }
             startActivity(new Intent(this, activity));
         } catch (Exception e) { error(e); }
     }
@@ -771,6 +797,7 @@ public final class LauncherActivity extends Activity {
         });
     }
     private void ready() {
+        if (importing) { play.setEnabled(false); playEngine.setEnabled(false); return; }
         // Not ready yet: the load is in flight, and its result calls back into here.
         if (!nativeLoaded.get()) {
             play.setEnabled(false); playEngine.setEnabled(false);
@@ -805,11 +832,63 @@ public final class LauncherActivity extends Activity {
                 }
             }
             boolean ready = nativePrepare(getFilesDir().getAbsolutePath());
-            boolean canPlay = ready && !importing;
+            boolean canPlay = ready || folder.isEmpty();
             play.setEnabled(canPlay);
-            playEngine.setEnabled(canPlay);
-            status.setText(ready ? "Game data ready." : "Import game data to begin.");
+            playEngine.setEnabled(ready);
+            play.setText(ready ? "Play (wasmtime engine)" : "Play — download game data");
+            status.setText(ready ? "Game data ready." : "Tap Play to download game data, or import your existing files. Keep the app open during setup.");
         } catch (Exception e) { play.setEnabled(false); playEngine.setEnabled(false); error(e); }
+    }
+
+    private void installOnFirstPlay(Class<?> activity) {
+        if (importing) return;
+        importing = downloading = true;
+        cancelDownload.set(false);
+        play.setEnabled(false); playEngine.setEnabled(false); importButton.setEnabled(false);
+        pauseDownload.setEnabled(true); pauseDownload.setVisibility(android.view.View.VISIBLE);
+        progress.setIndeterminate(true);
+        getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        worker.execute(() -> {
+            Exception failure = null;
+            try {
+                GameDataInstaller installer = new GameDataInstaller(GameDataInstaller.HTTPS, cancelDownload::get,
+                    message -> runOnUiThread(() -> { if (!isDestroyed()) status.setText(message); }));
+                installer.install(getFilesDir(), root -> copyEngineAssets("b/" + GameDataInstaller.BUILD, root));
+            } catch (Exception e) { failure = e; }
+            Exception result = failure;
+            runOnUiThread(() -> {
+                if (isDestroyed()) return;
+                importing = downloading = false;
+                importButton.setEnabled(true); pauseDownload.setVisibility(android.view.View.GONE);
+                progress.setIndeterminate(false);
+                getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                ready();
+                if (result != null) error(result);
+                else launch(activity);
+            });
+        });
+    }
+
+    private void copyEngineAssets(String path, File root) throws Exception {
+        if (cancelDownload.get()) throw new InterruptedIOException("Download paused. Tap Play to resume.");
+        String[] children = getAssets().list(path);
+        if (children != null && children.length > 0) {
+            for (String child : children) copyEngineAssets(path + "/" + child, root);
+            return;
+        }
+        File target = new File(root, path);
+        try (InputStream in = getAssets().open(path)) {
+            if (!target.getParentFile().isDirectory() && !target.getParentFile().mkdirs()) throw new IOException("Cannot create engine resource folder");
+            try (OutputStream out = new FileOutputStream(target)) {
+                byte[] buffer = new byte[128 * 1024]; int n;
+                while ((n = in.read(buffer)) != -1) {
+                    if (cancelDownload.get()) throw new InterruptedIOException("Download paused. Tap Play to resume.");
+                    out.write(buffer, 0, n);
+                }
+            }
+        } catch (FileNotFoundException e) {
+            throw new IOException("Matching engine resources are missing. Import a compatible game ZIP or use a build with engine resources.", e);
+        }
     }
     // The picker hands back a tree Uri but the engine reads plain paths, so the
     // tree document id is mapped back to /storage/emulated/0/... . Shared storage
@@ -1256,5 +1335,8 @@ public final class LauncherActivity extends Activity {
         if (settings != null && firstResume) { firstResume = false; return; }
         if (settings != null) ready();
     }
-    @Override protected void onDestroy() { worker.shutdown(); super.onDestroy(); }
+    @Override protected void onDestroy() {
+        if (downloading) cancelDownload.set(true);
+        worker.shutdown(); super.onDestroy();
+    }
 }

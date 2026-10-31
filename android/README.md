@@ -61,7 +61,7 @@ Gradle build checks that the requested native API is supported before compiling.
 
 1. Use Android 10+ on an ARM64 device with Vulkan 1.1. A high-end phone with
    **8–12 GB RAM** is recommended, but does not guarantee compatibility.
-2. Open **GTA 5** and choose **Download / Resume Game**, or select **Import game ZIP**
+2. In a build containing the matching engine resources, tap **Play — download game data**; otherwise select **Import game ZIP**
    with your own compatible web-port archive: `data/manifest.json`,
    `b/<build>/game.wasm`, and `b/<build>/shaders/index.json`. A regular Steam/PC
    installation alone is not compatible with this runtime. See the download
@@ -89,45 +89,39 @@ Gradle build checks that the requested native API is supported before compiling.
    RAM. Later launches reuse the cache. Do not import untrusted game archives
    or replace the private native-code cache with untrusted files.
 
-### Automatic download/install
+### First-Play setup
 
-- Manifest: <https://gcode.bytarch.com/download-manifest.json>. Its current
-  response is version 1, repository `alihammoud21/playgta5`, tag `full-game-v1`:
-  **14 independent ZIP archives, 21,192,696,051 bytes** (about 21.2 GB).
-  Archive URLs in that manifest point to the GitHub release, not gcode.bytarch.com.
-- Download only if you are entitled to use the assets. This is an unofficial
-  third-party source; asset ownership/redistribution permission is not granted
-  by this app. SHA-256 verification detects changed downloads, not legal rights
-  or trustworthy provenance. The APK and repository contain no game data.
-- Confirm the download in the launcher. Use Wi-Fi, keep the device charged,
-  and allow roughly **25 GB of free internal storage**, in addition to any
-  existing game installation. Storage is checked before downloading and before
-  extraction; the current manifest's initial estimate is about 24.95 GB.
-- A foreground service shows download/install progress and a **Pause** action.
-  Allow notifications on Android 13+ to see progress in the notification shade;
-  downloading still works if that permission is declined. **Download / Resume**
-  continues partial HTTP downloads and skips already installed/verified parts.
-  Closing the launcher does not deliberately cancel the service. Android may
-  still stop it due to OS policy, network loss, or force-stop; resume manually.
-  Android 15+ allows at most six background hours per day for data-sync services.
-- Each part is size-checked and SHA-256-checked before extracting, then its ZIP
-  entry sizes/CRC checksums are verified. Only game data, Wasm, and shaders are
-  installed: no Windows runtime, launch scripts, or browser workers are run.
-  The archive is deleted after its extraction receipt is saved. There is no
-  combined ZIP or duplicate full-game extraction.
-- Staged files are SHA-256-checked again before replacing the active game.
-  Existing game files stay intact until every part finishes. Saves/config are
-  outside the game directory and are preserved. Installation renames use a
-  recovery journal; tap Resume if installation was interrupted at the last step.
-- **Discard partial download** removes only installer staging/downloads, not
-  the installed game or saves. ZIP import is disabled until the partial download
-  is discarded, avoiding conflicting installations. A checksum failure removes
-  the bad archive; resume to retry. If completed staged files are damaged or the
-  manifest changes, discard and start again.
+The active source identified in the user-supplied APK is
+<https://pub-259a383567d14badb0df56ab4afe96f9.r2.dev/r2_manifest.json>.
+It advertises eight parts, about 13.7 GiB compressed and 14.2 GiB extracted.
+Use it only if entitled to download and use that data.
 
-The multi-gigabyte download, pause/background behavior, installation recovery,
-and actual gameplay still require real-device testing. JVM tests exercise the
-installer with small synthetic archives and mocked HTTP responses only.
+With no imported or selected game folder, Play starts setup. HTTPS transfers
+resume partial ZIPs, verify SHA-256 and size, and extract into staging with path,
+size and CRC checks. Verified part receipts allow retries and recheck staged
+content before skipping it. A complete game-data manifest is required before the
+staged folder is renamed into place. Saves and existing imports are preserved.
+Two verified stale XML file lengths are repaired only for exact known hashes;
+unrelated size mismatches fail setup.
+Keep the launcher open; **Pause download**, then Play resumes. This is not a
+background service and does not request notification permission.
+
+The mirror contains data, not the engine/shaders bundled by the reference APK.
+For an authorized private build, add this Gradle option:
+
+```sh
+gradle -p android testDebugUnitTest assembleDebug \
+  -PreferenceEngineApk=/absolute/path/GTAV_Android_v2_arm64.apk
+```
+
+The build checks the engine hash and packages only its `b/8b0b5899ed/game.wasm`
+and shader directory from that local input, under an ignored generated folder.
+Nothing is uploaded to GitHub. A source-only CI build lacks those resources and
+continues to support ZIP/folder import; first-Play setup fails before large
+downloads if resources are absent. See [APK comparison](../docs/APK_COMPARISON.md).
+
+The multi-gigabyte download, lifecycle behavior, final installation and gameplay
+require phone testing. Automated tests use synthetic archives and mocked HTTP.
 
 The left touch stick moves/steers; dragging the right area looks around.
 Buttons change when entering vehicles. AIM toggles, MENU reveals navigation

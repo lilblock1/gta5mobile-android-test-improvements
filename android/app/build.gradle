@@ -10,8 +10,8 @@ android {
         applicationId 'dev.muguet.test'
         minSdk 29
         targetSdk 36
-        versionCode 7
-        versionName '0.1.6-nightlane-worldstream-phase1'
+        versionCode 8
+        versionName '0.1.7-nightlane-first-play'
         ndk { abiFilters 'arm64-v8a' }
     }
     compileOptions {
@@ -56,7 +56,38 @@ dependencies {
     testImplementation 'org.json:json:20250517'
 }
 
-// Only the native library is included; users import their own game data.
+// Optional private build input. Only the matching engine + shaders are packaged;
+// no files from the supplied APK are committed or fetched during the build.
+if (project.hasProperty('referenceEngineApk')) {
+    def referenceApk = file(project.property('referenceEngineApk'))
+    def generatedAssets = layout.buildDirectory.dir('generated/reference-engine-assets')
+    tasks.register('prepareReferenceEngineAssets', Sync) {
+        from(zipTree(referenceApk)) {
+            include 'assets/b/8b0b5899ed/game.wasm', 'assets/b/8b0b5899ed/shaders/**'
+            eachFile { details -> details.path = details.path.substring('assets/'.length()) }
+            includeEmptyDirs = false
+        }
+        into generatedAssets
+        doLast {
+            def wasm = new File(generatedAssets.get().asFile, 'b/8b0b5899ed/game.wasm')
+            if (!wasm.isFile()) throw new GradleException('Reference APK has no matching engine resources')
+            if (!new File(generatedAssets.get().asFile, 'b/8b0b5899ed/shaders/index.json').isFile())
+                throw new GradleException('Reference APK has no matching shader index')
+            def hash = java.security.MessageDigest.getInstance('SHA-256')
+            wasm.withInputStream { stream ->
+                byte[] buffer = new byte[131072]
+                int count
+                while ((count = stream.read(buffer)) != -1) hash.update(buffer, 0, count)
+            }
+            if (hash.digest().encodeHex().toString() != '11ca8d2c04c5e843d18ff4aea4899d72c86973c6b031df334e67c446b2ae83e0')
+                throw new GradleException('Reference engine hash does not match supported build')
+        }
+    }
+    android.sourceSets.main.assets.srcDir(generatedAssets)
+    tasks.named('preBuild').configure { dependsOn 'prepareReferenceEngineAssets' }
+}
+
+// Build the native library; game resources are an optional, explicit private input.
 tasks.register('buildRust', Exec) {
     workingDir rootProject.projectDir.parentFile
     def nativeApi = android.defaultConfig.minSdkVersion.apiLevel

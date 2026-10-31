@@ -103,6 +103,7 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
     }
 
     @Override public void onCreate(Bundle state) {
+        configureMsaa();
         // Initialize the Vulkan proxy in this process before native rendering.
         if (!DriverBridge.prepare(this)) {
             android.util.Log.e("MuguetDriver", DriverBridge.status());
@@ -138,6 +139,29 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
             + "/" + android.os.Build.MODEL + " android_api="
             + android.os.Build.VERSION.SDK_INT + " android_release="
             + android.os.Build.VERSION.RELEASE + " game_path=wasmtime");
+    }
+
+    // Set before NativeActivity starts the renderer and caches its MSAA probe.
+    private void configureMsaa() {
+        try {
+            File file = new File(getFilesDir(), "config.json");
+            org.json.JSONObject config = file.isFile()
+                ? new org.json.JSONObject(new String(java.nio.file.Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8))
+                : new org.json.JSONObject();
+            android.app.ActivityManager manager = getSystemService(android.app.ActivityManager.class);
+            android.app.ActivityManager.MemoryInfo info = new android.app.ActivityManager.MemoryInfo();
+            if (manager != null) manager.getMemoryInfo(info);
+            String mode = config.optString("android_msaa_mode", "default");
+            int limit = MsaaPolicy.limit(mode, config.optDouble("scale", 0.5), info.totalMem);
+            // Retain an explicit native override for developer diagnostics.
+            if (android.system.Os.getenv("MUGUET_MSAA_MAX") == null)
+                android.system.Os.setenv("MUGUET_MSAA_MAX", Integer.toString(limit), true);
+            Log.i("Muguet", "MSAA mode=" + mode + " requested_cap=" + limit
+                + " effective_cap=" + android.system.Os.getenv("MUGUET_MSAA_MAX")
+                + " total_ram_bytes=" + info.totalMem);
+        } catch (Exception e) {
+            Log.w("Muguet", "MSAA settings unavailable; keeping native default", e);
+        }
     }
 
     private FrameLayout overlay;
