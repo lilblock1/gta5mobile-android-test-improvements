@@ -20,7 +20,6 @@ const BIND_DS: u32 = 0x40;
 const BIND_UAV: u32 = 0x80;
 const RING_CHUNK: u64 = 8 << 20;
 const UBO_WINDOW: u64 = 65536;
-const FRAME_SLOTS: usize = 3;
 const ZERO_VB_SIZE: u64 = 4096;
 const OCCLUSION_CAPACITY: u32 = 2048;
 const OCCLUSION_VISIBLE_COUNT: u64 = 65536;
@@ -1244,7 +1243,6 @@ pub struct Gpu {
     view_dependents: HashMap<u32, HashSet<u32>>,
     ubo_slots: Vec<Vec<Chunk>>,
     ubo_shared: Vec<(Buffer, u64)>,
-    ubo_slot: usize,
     ubo_chunk: usize,
     ubo_off: u64,
     dummy_tex: HashMap<String, TextureView>,
@@ -1268,7 +1266,7 @@ pub struct Gpu {
     pending_maps: Vec<PendingMap>,
     counter_src: Option<Buffer>,
     counter_slot: u32,
-    frame_slot_done: Vec<Option<SubmissionIndex>>,
+    frame_queue: crate::frame_queue::FrameQueue<SubmissionIndex>,
     last_submit: Option<SubmissionIndex>,
     vb_avail: [u64; 16],
     dbg_idx: u64,
@@ -1458,6 +1456,9 @@ impl Gpu {
             }
             Some(job_tx)
         };
+        let frame_queue = crate::frame_queue::FrameQueue::new(
+            &std::env::var("NIGHTLANE_FRAME_QUEUE").unwrap_or_default());
+        log(&format!("frame queue: {} uniform slots, surface latency {}", frame_queue.slots(), frame_queue.surface_latency()));
         Ok(Gpu {
             instance: instance.clone(), pending_clears: HashMap::new(), clears_folded: 0, pipe_jobs, pipe_results, pipe_pending: HashMap::new(), pending_skips: 0, pending_skips0: 0,
             base, mem, ring, device, queue, adapter, surface, surface_format, surface_size: (0, 0),
@@ -1476,12 +1477,12 @@ impl Gpu {
             pipeline_fifo: VecDeque::new(), pipeline_evictions: 0,
             compute: HashMap::new(), bind_groups: FifoCache::new(BG_LIMIT),
             bg_dependents: HashMap::new(), view_dependents: HashMap::new(),
-            ubo_slots: (0..FRAME_SLOTS).map(|_| Vec::new()).collect(), ubo_shared: Vec::new(), ubo_slot: 0, ubo_chunk: 0, ubo_off: 0,
+            ubo_slots: (0..frame_queue.slots()).map(|_| Vec::new()).collect(), ubo_shared: Vec::new(), ubo_chunk: 0, ubo_off: 0,
             dummy_tex: HashMap::new(), dummy_smp: None, dummy_cmp: None, dummy_bufs: HashMap::new(), zero_vb: None, zero_src: None, scratch: None,
             proxy_pipelines: HashMap::new(), f2d_pipeline: None, blit: None, mip_pipelines: HashMap::new(), mip_sampler: None,
             occlusion_set: None, occlusion_next: 0, occlusion_active: None, occlusion_pass_slot: None,
             pending_resolve: Vec::new(), pending_events: Vec::new(), pending_maps: Vec::new(), counter_src: None, counter_slot: 0,
-            frame_slot_done: (0..FRAME_SLOTS).map(|_| None).collect(), last_submit: None, vb_avail: [0; 16],
+            frame_queue, last_submit: None, vb_avail: [0; 16],
             dbg_idx: if dbg != 0 { dbg + 424 } else { 0 },
             draws: 0, skipped: 0, presents: 0, pipe_creates: 0, fps_t0: Instant::now(), fps_n0: 0, fps_d0: 0,
             frame_waits: 0, frame_wait_ns: 0, frame_wait_max_ns: 0,
@@ -2387,13 +2388,26 @@ impl Gpu {
             Ok(s) => s,
             Err(e) => { log_once(&format!("nosrc{hash}"), &format!("shader source {hash}: {e}")); return None; }
         };
-        let (lowered, clip) = if self.device.features().contains(Features::CLIP_DISTANCES) {
-            (source.clone(), None)
-        } else {
-            Self::lower_clip_distances(&source)
+        let patched = if std::env::var("NIGHTLANE_SHADOW_FIX").unwrap_or_default() != "0" {
+            crate::shader_fixes::shadow_cascade(hash, &source)
+        } else { None };
+        let prepare = |src: &str| {
+            let (lowered, clip) = if self.device.features().contains(Features::CLIP_DISTANCES) {
+                (src.to_string(), None)
+            } else { Self::lower_clip_distances(src) };
+            let (text, pack) = pack_uniforms(&lowered);
+            (text, pack, clip)
         };
-        let (text, pack) = pack_uniforms(&lowered);
-        let module = self.scoped(&format!("shader {label}"), |d| d.create_shader_module(ShaderModuleDescriptor { label: Some(&label), source: ShaderSource::Wgsl(text.as_str().into()) }))?;
+        let (mut text, mut pack, mut clip) = prepare(patched.as_deref().unwrap_or(&source));
+        let mut module = self.scoped(&format!("shader {label}"), |d| d.create_shader_module(ShaderModuleDescriptor { label: Some(&label), source: ShaderSource::Wgsl(text.as_str().into()) }));
+        if patched.is_some() {
+            if module.is_none() {
+                log("shadow cascade fix rejected by driver; retrying original shader");
+                (text, pack, clip) = prepare(&source);
+                module = self.scoped(&format!("stock shader {label}"), |d| d.create_shader_module(ShaderModuleDescriptor { label: Some(&label), source: ShaderSource::Wgsl(text.as_str().into()) }));
+            } else { log("shadow cascade integer selection and receiver-plane bias guard applied"); }
+        }
+        let module = module?;
         let info = parse_wgsl(&text);
         let mut consts = None;
         if rec.as_ref().and_then(|r| r.get("consts")).map(|c| !c.is_null() && c != &serde_json::Value::Bool(false)).unwrap_or(false) {
@@ -2904,13 +2918,13 @@ impl Gpu {
 
     fn uniform_alloc(&mut self, size: u64) -> (usize, u64) {
         let size = (size + 255) & !255;
-        let slot = self.ubo_slot;
+        let slot = self.frame_queue.slot();
         let need_new = match self.ubo_slots[slot].get(self.ubo_chunk) { None => true, Some(_) => self.ubo_off + size + UBO_WINDOW > RING_CHUNK };
         if need_new {
             if self.ubo_slots[slot].get(self.ubo_chunk).is_some() { self.ubo_chunk += 1; self.ubo_off = 0; }
             if self.ubo_slots[slot].get(self.ubo_chunk).is_none() {
                 while self.ubo_shared.len() <= self.ubo_chunk {
-                    let buf = self.device.create_buffer(&BufferDescriptor { label: Some("uniform ring"), size: RING_CHUNK * FRAME_SLOTS as u64, usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST, mapped_at_creation: false });
+                    let buf = self.device.create_buffer(&BufferDescriptor { label: Some("uniform ring"), size: RING_CHUNK * self.frame_queue.slots() as u64, usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST, mapped_at_creation: false });
                     let id = self.uid();
                     self.ubo_shared.push((buf, id));
                 }
@@ -2947,7 +2961,7 @@ impl Gpu {
         // Write directly into persistent uniform staging memory instead of
         // allocating a temporary Vec and copying it again on every draw.
         let objects = &self.objs;
-        let chunk = &mut self.ubo_slots[self.ubo_slot][ci];
+        let chunk = &mut self.ubo_slots[self.frame_queue.slot()][ci];
         if chunk.stage.len() < end {
             chunk.stage.resize((end.max(262144)).next_power_of_two().min(RING_CHUNK as usize), 0);
         }
@@ -3018,7 +3032,7 @@ impl Gpu {
                         continue;
                     }
                     let (ci, off) = self.pack_copy(prog, stage)?;
-                    let c = &self.ubo_slots[self.ubo_slot][ci];
+                    let c = &self.ubo_slots[self.frame_queue.slot()][ci];
                     entries.push((0, Res::Buf(c.buf.clone(), 0, Some(prog.pack.as_ref().unwrap().size))));
                     dyn_off = Some((c.base + off) as u32);
                     key.push(c.id);
@@ -4126,7 +4140,7 @@ impl Gpu {
                     } else {
                         PresentMode::Fifo
                     },
-                    desired_maximum_frame_latency: 2,
+                    desired_maximum_frame_latency: self.frame_queue.surface_latency(),
                     alpha_mode: caps.alpha_modes[0],
                     view_formats: vec![],
                     color_space: SurfaceColorSpace::Auto,
@@ -4216,11 +4230,10 @@ impl Gpu {
         // Record a fence only when this frame actually submitted GPU work.
         // Reusing the previous submission index on empty frames caused
         // redundant Wait polls even when no uniform data could be in flight.
-        self.frame_slot_done[self.ubo_slot] = self.last_submit.take();
-        self.ubo_slot = (self.ubo_slot + 1) % FRAME_SLOTS;
+        let reuse_fence = self.frame_queue.finish(self.last_submit.take());
         self.ubo_chunk = 0;
         self.ubo_off = 0;
-        if let Some(idx) = self.frame_slot_done[self.ubo_slot].take() {
+        if let Some(idx) = reuse_fence {
             let started = Instant::now();
             let _ = self.device.poll(PollType::Wait { submission_index: Some(idx), timeout: None });
             let elapsed = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;

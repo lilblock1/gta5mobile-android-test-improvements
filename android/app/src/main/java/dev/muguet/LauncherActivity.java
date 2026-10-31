@@ -188,9 +188,9 @@ public final class LauncherActivity extends Activity {
     private Button play, playEngine, importButton, clearFolderButton, grantAccessButton;
     private TextView folderStatus;
     private ProgressBar progress;
-    private Spinner mode, heap, streamingBudget, worldstreamMode, msaaMode;
+    private Spinner mode, heap, streamingBudget, worldstreamMode, msaaMode, frameQueue;
     private Spinner nightlanePresent, nightlaneSharpness, nightlaneLod, nightlaneHudSize, nightlaneHudOpacity;
-    private CheckBox nightlaneThermal, nightlaneCompactHud;
+    private CheckBox nightlaneThermal, nightlaneCompactHud, automaticHeap, readAhead, shadowFix;
     private static final double[] STREAMING_BUDGETS = {0.35, 0.25, 0.15};
     private EditText scale, name, magnetField, relayUrl, relayRoom, relayKey;
     private CheckBox mute, multiplayer, cpuBc, softwareClip;
@@ -444,6 +444,16 @@ public final class LauncherActivity extends Activity {
         column.addView(loadMagnetButton);
         mode = choice(column, "Start mode", new String[]{"Story", "Sandbox"}, settings.optInt("start_mode", 2) == 1 ? 0 : 1);
         heap = choice(column, "Maximum game heap (not total app memory)", new String[]{"3 GB", "4 GB", "5 GB", "6 GB", "7 GB", "8 GB"}, Math.max(0, Math.min(5, settings.optInt("android_heap_gb", 5) - 3)));
+        automaticHeap = check(column, "Reserve memory for Android and graphics (limit heap to physical RAM budget)",
+            settings.optBoolean("android_auto_heap", true));
+        readAhead = check(column, "Experimental storage read-ahead (may reduce streaming stalls; test on your phone)",
+            settings.optBoolean("nightlane_read_ahead", false));
+        String queueMode = settings.optString("nightlane_frame_queue", "original");
+        frameQueue = choice(column, "Frame queue (restart game to apply)",
+            new String[]{"Original — 3 frames", "Lower latency — 2 frames", "Minimum latency — 1 frame (may reduce FPS)"},
+            "minimal".equals(queueMode) ? 2 : "low_latency".equals(queueMode) ? 1 : 0);
+        shadowFix = check(column, "Shadow cascade fix (integer selection and stable receiver bias)",
+            settings.optBoolean("nightlane_shadow_fix", true));
         double currentStreaming = settings.optDouble("streamer_percentage", 0.35);
         int streamingChoice = currentStreaming <= 0.20 ? 2 : currentStreaming <= 0.30 ? 1 : 0;
         streamingBudget = choice(column, "World streaming memory (lower uses less memory but may cause more asset reloads)",
@@ -707,6 +717,10 @@ public final class LauncherActivity extends Activity {
             settings.put("android_msaa_mode", new String[]{"default", "adaptive", "off"}[msaaMode.getSelectedItemPosition()]);
             settings.put("start_mode", mode.getSelectedItemPosition() + 1);
             settings.put("android_heap_gb", heap.getSelectedItemPosition() + 3);
+            settings.put("android_auto_heap", automaticHeap.isChecked());
+            settings.put("nightlane_read_ahead", readAhead.isChecked());
+            settings.put("nightlane_shadow_fix", shadowFix.isChecked());
+            settings.put("nightlane_frame_queue", new String[]{"original", "low_latency", "minimal"}[frameQueue.getSelectedItemPosition()]);
             settings.put("streamer_percentage", STREAMING_BUDGETS[streamingBudget.getSelectedItemPosition()]);
             settings.put("nightlane_worldstream_config_version", 1);
             settings.put("nightlane_worldstream_mode",

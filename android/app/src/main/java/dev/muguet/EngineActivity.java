@@ -183,9 +183,13 @@ public final class EngineActivity extends Activity {
             frameLimit = config.optInt("fps_limit", 30) <= 30 ? 30 : 60;
             int startMode = config.optInt("start_mode", 2);
             // EngineHost reads PG_ENGINE_HEAP_MB before boot; set it from the
-            // launcher's chosen heap so the process is not killed for committing
-            // more than Android's largeHeap allows.
-            int heapGb = Math.max(1, Math.min(8, config.optInt("android_heap_gb", 5)));
+            // chosen ceiling and optional physical-RAM budget. This does not
+            // guarantee Android will allow all of that memory to be resident.
+            android.app.ActivityManager manager = getSystemService(android.app.ActivityManager.class);
+            android.app.ActivityManager.MemoryInfo memory = new android.app.ActivityManager.MemoryInfo();
+            if (manager != null) manager.getMemoryInfo(memory);
+            int heapGb = HeapPolicy.limit(config.optInt("android_heap_gb", 5), memory.totalMem,
+                config.optBoolean("android_auto_heap", true));
             nativeSetHeapMb(heapGb * 1024);
 
             File gameDir = gameFolder();

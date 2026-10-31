@@ -103,7 +103,7 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
     }
 
     @Override public void onCreate(Bundle state) {
-        configureMsaa();
+        configureDeviceLimits();
         // Initialize the Vulkan proxy in this process before native rendering.
         if (!DriverBridge.prepare(this)) {
             android.util.Log.e("MuguetDriver", DriverBridge.status());
@@ -142,7 +142,7 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
     }
 
     // Set before NativeActivity starts the renderer and caches its MSAA probe.
-    private void configureMsaa() {
+    private void configureDeviceLimits() {
         try {
             File file = new File(getFilesDir(), "config.json");
             org.json.JSONObject config = file.isFile()
@@ -151,6 +151,12 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
             android.app.ActivityManager manager = getSystemService(android.app.ActivityManager.class);
             android.app.ActivityManager.MemoryInfo info = new android.app.ActivityManager.MemoryInfo();
             if (manager != null) manager.getMemoryInfo(info);
+            int requestedHeap = config.optInt("android_heap_gb", 5);
+            int heapLimit = HeapPolicy.limit(requestedHeap, info.totalMem, config.optBoolean("android_auto_heap", true));
+            if (android.system.Os.getenv("MUGUET_ANDROID_HEAP_GB") == null)
+                android.system.Os.setenv("MUGUET_ANDROID_HEAP_GB", Integer.toString(heapLimit), true);
+            Log.i("Muguet", "Heap requested_gb=" + requestedHeap + " effective_gb="
+                + android.system.Os.getenv("MUGUET_ANDROID_HEAP_GB") + " total_ram_bytes=" + info.totalMem);
             String mode = config.optString("android_msaa_mode", "default");
             int limit = MsaaPolicy.limit(mode, config.optDouble("scale", 0.5), info.totalMem);
             // Retain an explicit native override for developer diagnostics.
@@ -160,7 +166,7 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
                 + " effective_cap=" + android.system.Os.getenv("MUGUET_MSAA_MAX")
                 + " total_ram_bytes=" + info.totalMem);
         } catch (Exception e) {
-            Log.w("Muguet", "MSAA settings unavailable; keeping native default", e);
+            Log.w("Muguet", "Device limits unavailable; keeping native defaults", e);
         }
     }
 

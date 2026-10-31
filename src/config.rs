@@ -237,6 +237,17 @@ fn settings(cfg_path: &Path) -> Vec<String> {
         eprintln!("{}", worldstream.log_line());
     }
     if let Some(v) = num("scale") { set_default("MUGUET_SCALE", v.to_string()); }
+    let frame_queue = cfg.get("nightlane_frame_queue").and_then(|v| v.as_str()).unwrap_or("original");
+    set_default("NIGHTLANE_FRAME_QUEUE", match frame_queue {
+        "low_latency" => "low_latency", "minimal" => "minimal", _ => "original",
+    });
+    set_default("NIGHTLANE_READ_AHEAD", if flag("nightlane_read_ahead") { "1" } else { "0" });
+    set_default("NIGHTLANE_SHADOW_FIX", if cfg.get("nightlane_shadow_fix").and_then(|v| v.as_bool()).unwrap_or(true) { "1" } else { "0" });
+    eprintln!("[device-limits] effective_heap_gb={} frame_queue={} read_ahead={} shadow_fix={}",
+        std::env::var("MUGUET_ANDROID_HEAP_GB").unwrap_or_else(|_| "n/a".into()),
+        std::env::var("NIGHTLANE_FRAME_QUEUE").unwrap_or_default(),
+        std::env::var("NIGHTLANE_READ_AHEAD").unwrap_or_default(),
+        std::env::var("NIGHTLANE_SHADOW_FIX").unwrap_or_default());
     if let Some(v) = num("mouse_sensitivity") { set_default("MUGUET_MOUSE_SENS", v.to_string()); }
     if let Some(v) = num("touch_sensitivity") { set_default("MUGUET_TOUCH_SENS", v.to_string()); }
     if let Some(r) = cfg.get("resolution").and_then(|v| v.as_str()) { set_default("MUGUET_RES", r); }

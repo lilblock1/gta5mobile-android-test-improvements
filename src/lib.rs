@@ -12,6 +12,9 @@ mod input;
 mod import;
 mod io;
 mod io_range;
+mod read_ahead;
+mod frame_queue;
+mod shader_fixes;
 mod worldstream;
 mod mp;
 #[cfg(target_vendor = "apple")]
