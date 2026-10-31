@@ -50,6 +50,20 @@ set(BRIDGE_SOURCE ${REPO_ROOT}/vendor/fivestar/EngineBridge.c)
 
 add_library(gta5engine SHARED ${HOST_SOURCES} ${BRIDGE_SOURCE} ${GAME_CODE_SOURCES})
 
+# An opt-in C compiler cache accelerates repeated builds of the 256 wasm2c
+# translation units without changing the generated game code or compile flags.
+# Android Gradle uses Ninja: C_COMPILER_LAUNCHER runs ccache in front of NDK
+# Clang on every C compilation. Keep normal local builds independent of ccache.
+if("$ENV{NIGHTLANE_NATIVE_CCACHE}" STREQUAL "1")
+  find_program(NIGHTLANE_CCACHE_EXECUTABLE NAMES ccache)
+  if(NOT NIGHTLANE_CCACHE_EXECUTABLE)
+    message(FATAL_ERROR "NIGHTLANE_NATIVE_CCACHE=1 but ccache was not found")
+  endif()
+  set_property(TARGET gta5engine PROPERTY C_COMPILER_LAUNCHER "${NIGHTLANE_CCACHE_EXECUTABLE}")
+  message(STATUS "[nightlane-native] C compiler cache enabled: ${NIGHTLANE_CCACHE_EXECUTABLE}")
+endif()
+
+
 target_include_directories(gta5engine PRIVATE
   ${REPO_ROOT}/vendor/fivestar
   ${GENERATED_DIR}
