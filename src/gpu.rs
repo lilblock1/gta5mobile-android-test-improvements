@@ -396,6 +396,7 @@ fn watchdog_present_attempt() {
                 let gpu_age = now.saturating_sub(WATCHDOG_LAST_GPU_TICK_MS.load(Ordering::Relaxed));
                 let count = WATCHDOG_PRESENT_ATTEMPTS.load(Ordering::Relaxed);
                 let movie_events = crate::host::movie_diagnostics_snapshot();
+                let movie_trace = crate::movie_trace::snapshot();
                 let ring_head = WATCHDOG_RING_HEAD.load(Ordering::Relaxed);
                 let ring_tail = WATCHDOG_RING_TAIL.load(Ordering::Relaxed);
                 let inflight = WATCHDOG_INFLIGHT.load(Ordering::Relaxed);
@@ -403,7 +404,7 @@ fn watchdog_present_attempt() {
                 let stage = WATCHDOG_STAGE.load(Ordering::Relaxed);
                 let stage_age = now.saturating_sub(WATCHDOG_STAGE_SINCE_MS.load(Ordering::Relaxed));
                 let command_age = now.saturating_sub(WATCHDOG_LAST_COMMAND_MS.load(Ordering::Relaxed));
-                let report = format!("[nightlane-freeze] no_present_attempt_ms={present_age} gpu_loop_last_tick_ms={gpu_age} present_attempts={count} suspended=false occluded=false movie_events={movie_events:?} ring_head={ring_head} ring_tail={ring_tail} gpu_inflight={inflight} last_opcode={last_opcode} gpu_stage={stage} gpu_stage_ms={stage_age} last_command_ms={command_age} diagnostic_only=true");
+                let report = format!("[nightlane-freeze] no_present_attempt_ms={present_age} gpu_loop_last_tick_ms={gpu_age} present_attempts={count} suspended=false occluded=false movie_events={movie_events:?} movie_trace={movie_trace:?} ring_head={ring_head} ring_tail={ring_tail} gpu_inflight={inflight} last_opcode={last_opcode} gpu_stage={stage} gpu_stage_ms={stage_age} last_command_ms={command_age} diagnostic_only=true");
                 eprintln!("{report}");
                 // Persistent app-private report for later log export; best effort only.
                 if let Ok(root) = std::env::var("MUGUET_DATA") {
