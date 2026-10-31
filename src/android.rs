@@ -19,6 +19,16 @@ pub extern "system" fn Java_dev_muguet_GameActivity_nativeMovieManagerStalled(
     if crate::movie_stall::suspected() { JNI_TRUE } else { JNI_FALSE }
 }
 
+/// 0=healthy/unknown, 1=Movie Manager stalled, 2=PauseMenu stalled
+/// *and* no present attempts for at least 60 seconds. Read only; never
+/// restarts a process or executes synthetic game/cutscene callbacks.
+#[no_mangle]
+pub extern "system" fn Java_dev_muguet_GameActivity_nativeLoadingStallKind(
+    _env: JNIEnv, _class: JClass,
+) -> jint {
+    crate::movie_stall::suspected_kind() as jint
+}
+
 pub fn activity() -> AndroidApp { ACTIVITY.get().expect("android_main not initialized").clone() }
 
 pub fn start_logging(dir: &str) {
