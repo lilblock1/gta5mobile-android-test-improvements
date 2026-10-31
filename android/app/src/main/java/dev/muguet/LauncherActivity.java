@@ -1068,7 +1068,7 @@ public final class LauncherActivity extends Activity {
                 for (File log : new File[]{logFile(), nativeLogFile()}) {
                     if (!log.isFile() || log.length() <= 0) continue;
                     included = true;
-                    out.write(("\\n----- " + log.getName() + " -----\\n").getBytes(StandardCharsets.UTF_8));
+                    out.write(("\n----- " + log.getName() + " -----\n").getBytes(StandardCharsets.UTF_8));
                     try (InputStream in = new FileInputStream(log)) {
                         int n;
                         while ((n = in.read(buffer)) != -1) out.write(buffer, 0, n);
