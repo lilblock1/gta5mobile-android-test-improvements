@@ -55,6 +55,7 @@ fn record_movie_event(source: &str, line: &str) {
     events.push_back(event);
 }
 fn log_engine_line(source: &str, line: &str) {
+    crate::movie_trace::observe_engine_line(line);
     crate::movie_stall::observe_engine_line(line);
     record_movie_event(source, line);
     let skipped = if line.starts_with("Warning:") {
