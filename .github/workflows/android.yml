@@ -24,6 +24,10 @@ jobs:
       CARGO_PROFILE_RELEASE_DEBUG: '0'
     steps:
       - uses: actions/checkout@v5
+      - name: Prepare verified engine and shaders
+        run: |
+          python3 -m unittest discover -s tools/tests -v
+          python3 tools/engine_resources.py prepare --output "$RUNNER_TEMP/nightlane-engine-resources.zip"
       - name: Print toolchain requirements
         run: echo 'Wasmtime 49 requires Rust 1.96 or later; building with the current stable toolchain.'
       - uses: actions/setup-java@v5
@@ -68,7 +72,14 @@ jobs:
           printf '%s' "$KEYSTORE" | base64 -d > "$RUNNER_TEMP/keystore.jks"
           echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/keystore.jks" >> "$GITHUB_ENV"
       - name: Build APK
-        run: gradle -p android testDebugUnitTest assembleDebug -PwithDriverProxy=true --no-daemon --stacktrace
+        run: >-
+          gradle -p android testDebugUnitTest assembleDebug -PwithDriverProxy=true
+          "-PengineResourcesZip=$RUNNER_TEMP/nightlane-engine-resources.zip" --no-daemon --stacktrace
+      - name: Verify packaged engine and shaders
+        run: >-
+          python3 tools/engine_resources.py verify-apk
+          --apk android/app/build/outputs/apk/debug/app-debug.apk
+          --resources "$RUNNER_TEMP/nightlane-engine-resources.zip"
       - name: Upload installable debug APK
         uses: actions/upload-artifact@v5
         with:
@@ -80,7 +91,7 @@ jobs:
         run: |
           echo '### Android build' >> "$GITHUB_STEP_SUMMARY"
           echo 'Download **Nightlane-Android-arm64-experimental-debug** from this run’s Artifacts section and extract the APK.' >> "$GITHUB_STEP_SUMMARY"
-          echo 'Experimental ARM64 / Android 10+ / Vulkan. No game data is included. Device testing is still required.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Includes verified engine and shaders. First Play downloads game data; keep the launcher open. Experimental ARM64 / Android 10+ / Vulkan; device testing is still required.' >> "$GITHUB_STEP_SUMMARY"
 
   tests:
     name: Rust unit tests

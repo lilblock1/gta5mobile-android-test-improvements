@@ -3,7 +3,7 @@
 This adds an **ARM64 native Android application**, not an iOS emulator or a
 WebView. It uses Wasmtime for `game.wasm`, wgpu/Vulkan for graphics, CPAL/AAudio
 for audio, Android views for touch controls, and the existing UDP multiplayer.
-No proprietary game files are included in the APK.
+The APK includes the matching engine and shaders; bulk game data downloads on first Play.
 This fork installs as **Grand V Android Test** under application ID
 `dev.muguet.test`. It can be installed alongside the original `dev.muguet` app
 without replacing it. Each app has separate private game files, saves and config;
@@ -28,6 +28,7 @@ No game ZIP, signing credentials, or game-code cache belongs in the repository.
 
 - Current stable Rust supporting the existing Wasmtime 49 dependencies.
 - JDK **17** (set `JAVA_HOME` accordingly) and **Gradle 8.13** on `PATH`.
+- Python **3.9+** for the checked engine-resource bundle.
 - Android SDK with `platforms;android-36`, `build-tools;36.0.0`, and
   `ndk;28.2.13676358` installed from Android Studio's SDK Manager.
 - `ANDROID_HOME` pointing to the SDK, or `android/local.properties` with `sdk.dir`.
@@ -61,7 +62,7 @@ Gradle build checks that the requested native API is supported before compiling.
 
 1. Use Android 10+ on an ARM64 device with Vulkan 1.1. A high-end phone with
    **8–12 GB RAM** is recommended, but does not guarantee compatibility.
-2. In a build containing the matching engine resources, tap **Play — download game data**; otherwise select **Import game ZIP**
+2. Tap **Play — download game data**, or select **Import game ZIP**
    with your own compatible web-port archive: `data/manifest.json`,
    `b/<build>/game.wasm`, and `b/<build>/shaders/index.json`. A regular Steam/PC
    installation alone is not compatible with this runtime. See the download
@@ -106,19 +107,22 @@ unrelated size mismatches fail setup.
 Keep the launcher open; **Pause download**, then Play resumes. This is not a
 background service and does not request notification permission.
 
-The mirror contains data, not the engine/shaders bundled by the reference APK.
-For an authorized private build, add this Gradle option:
+The mirror contains data. GitHub Actions and both local build scripts now prepare
+the checked `engine-resources/` snapshot and include the matching engine/shaders.
+To run Gradle directly, prepare the bundle and pass its ZIP:
 
 ```sh
+python3 tools/engine_resources.py prepare --output work/engine-resources.zip
 gradle -p android testDebugUnitTest assembleDebug \
-  -PreferenceEngineApk=/absolute/path/GTAV_Android_v2_arm64.apk
+  "-PengineResourcesZip=$PWD/work/engine-resources.zip"
 ```
 
-The build checks the engine hash and packages only its `b/8b0b5899ed/game.wasm`
-and shader directory from that local input, under an ignored generated folder.
-Nothing is uploaded to GitHub. A source-only CI build lacks those resources and
-continues to support ZIP/folder import; first-Play setup fails before large
-downloads if resources are absent. See [APK comparison](../docs/APK_COMPARISON.md).
+The build checks the engine hash and packages only `b/8b0b5899ed/game.wasm`
+and its shader directory. The workflow verifies every resource in the finished
+APK before uploading it. `-PreferenceEngineApk=/absolute/path/reference.apk`
+remains available for a separately supplied local APK. See
+[bundle provenance](../engine-resources/README.md) and
+[APK comparison](../docs/APK_COMPARISON.md).
 
 The multi-gigabyte download, lifecycle behavior, final installation and gameplay
 require phone testing. Automated tests use synthetic archives and mocked HTTP.

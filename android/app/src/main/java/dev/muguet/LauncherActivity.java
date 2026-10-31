@@ -877,7 +877,12 @@ public final class LauncherActivity extends Activity {
             return;
         }
         File target = new File(root, path);
-        try (InputStream in = getAssets().open(path)) {
+        InputStream asset;
+        try { asset = getAssets().open(path); }
+        catch (FileNotFoundException e) {
+            throw new IOException("This APK is missing an engine resource: " + path + ". Install the complete Nightlane build.", e);
+        }
+        try (InputStream in = asset) {
             if (!target.getParentFile().isDirectory() && !target.getParentFile().mkdirs()) throw new IOException("Cannot create engine resource folder");
             try (OutputStream out = new FileOutputStream(target)) {
                 byte[] buffer = new byte[128 * 1024]; int n;
@@ -886,8 +891,6 @@ public final class LauncherActivity extends Activity {
                     out.write(buffer, 0, n);
                 }
             }
-        } catch (FileNotFoundException e) {
-            throw new IOException("Matching engine resources are missing. Import a compatible game ZIP or use a build with engine resources.", e);
         }
     }
     // The picker hands back a tree Uri but the engine reads plain paths, so the

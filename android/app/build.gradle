@@ -10,8 +10,8 @@ android {
         applicationId 'dev.muguet.test'
         minSdk 29
         targetSdk 36
-        versionCode 8
-        versionName '0.1.7-nightlane-first-play'
+        versionCode 9
+        versionName '0.1.8-nightlane-bundled-engine'
         ndk { abiFilters 'arm64-v8a' }
     }
     compileOptions {
@@ -56,10 +56,11 @@ dependencies {
     testImplementation 'org.json:json:20250517'
 }
 
-// Optional private build input. Only the matching engine + shaders are packaged;
-// no files from the supplied APK are committed or fetched during the build.
-if (project.hasProperty('referenceEngineApk')) {
-    def referenceApk = file(project.property('referenceEngineApk'))
+// CI supplies a checked ZIP from engine-resources/. A local reference APK remains
+// supported; both inputs contain the same assets/b/<build>/ layout.
+def engineArchivePath = project.findProperty('engineResourcesZip') ?: project.findProperty('referenceEngineApk')
+if (engineArchivePath) {
+    def referenceApk = file(engineArchivePath)
     def generatedAssets = layout.buildDirectory.dir('generated/reference-engine-assets')
     tasks.register('prepareReferenceEngineAssets', Sync) {
         from(zipTree(referenceApk)) {

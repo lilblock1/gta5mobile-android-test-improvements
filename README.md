@@ -21,9 +21,10 @@ renderer using Vulkan on Android (Metal on Apple platforms). The renderer is
 being optimized **incrementally** for Android; it is **not yet a fully rewritten
 native Vulkan engine**. The original presentation path remains available.
 
-**No proprietary game content is committed.** Source-only builds rely on user
-imports; private builds may include explicitly supplied engine resources as
-described below. Users must be entitled to use their data. This is experimental software; compatibility, FPS,
+The repository includes a verified snapshot of the user-supplied engine and
+shaders for build `8b0b5899ed`. GitHub APKs package these resources; the large data
+archives download on first Play. Users must be entitled to use their data.
+This is experimental software; compatibility, FPS,
 graphics improvements and device stability are not guaranteed.
 
 - **Android (working target)** — ARM64, Android 10+, Vulkan. See below.
@@ -38,7 +39,8 @@ sideloaded. GitHub Actions currently uses a runner debug key unless a persistent
 signing keystore is configured; in that case, upgrading an older installation
 may require matching its certificate or backing up saves before reinstalling.
 
-Push to `main` or `phase1-world-streaming` and GitHub Actions builds the source-only APK. Locally: `sh make-android.sh` or
+Push to `main` or `phase1-world-streaming` and GitHub Actions builds an APK with
+the matching engine and shaders. Locally: `sh make-android.sh` or
 `.\make-android.ps1`, output at
 `android/app/build/outputs/apk/debug/app-debug.apk`.
 
@@ -62,14 +64,14 @@ the staged folder only when complete. Existing imports and saves are preserved.
 The current manifest advertises about **13.7 GiB compressed / 14.2 GiB extracted**;
 allow extra room for one archive and the bundled engine resources.
 
-The mirror supplies **data only**. A private build must also supply the matching
-`8b0b5899ed` engine and shaders from an APK you are authorized to use:
-`gradle -p android assembleDebug -PreferenceEngineApk=/absolute/path/reference.apk`.
-The build verifies the engine hash and stages resources under the ignored build
-directory. Source-only CI builds do not include these assets and must use a
-compatible imported game ZIP instead. No game archive is downloaded by the build,
-and no game content is committed to this repository. The reference manifest and
-comparison details are in [the APK investigation](docs/APK_COMPARISON.md).
+The mirror supplies **data only**. The matching engine and 6,684 shader files are
+stored as a checked bundle under `engine-resources/`. GitHub Actions prepares
+that bundle, verifies its hashes, and packages it automatically. It also compares
+every packaged resource against the bundle before publishing the APK, so an APK
+missing those files cannot pass the build. The local build scripts do the same
+preparation and require Python 3.9+. No bulk game archive is downloaded by the
+build. See [bundle provenance and local commands](engine-resources/README.md)
+and [the APK investigation](docs/APK_COMPARISON.md).
 
 - **Use a game files folder** — pick a folder that already holds `data/` and
   `b/`. It is used where it lies, so nothing is copied and no free space is
@@ -252,8 +254,9 @@ model, Android version and Vulkan driver, plus the exported logs from the
 
 ## Legal
 
-This repository contains no game assets. Users must be entitled to use their
-web-port data and any engine resources supplied to a private build. The optional
+This repository includes the user-supplied engine/shader bundle documented in
+`engine-resources/`; it does not contain the bulk game-data archives. Users must
+be entitled to use their web-port data and engine resources. The optional
 installer contacts a third-party mirror; a manifest hash does not establish
 ownership or redistribution rights. No license checks are bypassed.
 

@@ -19,6 +19,10 @@ DerivedData/
 .vscode/
 .idea/
 
+# Python build-tool caches.
+__pycache__/
+*.py[cod]
+
 *.zip
 *.ipa
 *.wasm

@@ -76,15 +76,17 @@ fail installation. Configuration content is preserved; there is no broad
 "accept actual sizes" fallback and no change to previously imported games.
 
 The reference APK supplies engine resources separately from its data mirror.
-For an authorized private build, pass
-`-PreferenceEngineApk=/absolute/path/GTAV_Android_v2_arm64.apk` to Gradle.
-Only `assets/b/8b0b5899ed/game.wasm` and its shader directory are staged under
-the ignored build directory and packaged. Both build and installer verify the
+Version 0.1.8 now includes the matching user-supplied resource snapshot in
+`engine-resources/`. GitHub Actions and the local build scripts verify and prepare
+it automatically; every resource in the finished GitHub APK is checked before
+upload. A local `-PreferenceEngineApk=/absolute/path/GTAV_Android_v2_arm64.apk`
+input remains supported. Only the engine and shader directory are staged and
+packaged. Both build and installer verify the
 engine's SHA-256:
 `11ca8d2c04c5e843d18ff4aea4899d72c86973c6b031df334e67c446b2ae83e0`.
 The engine hash matches the existing wasm2c pin documented by this branch.
-Default source-only CI builds do not include these resources; they fail setup
-before downloading large archives and still accept the existing ZIP/folder flow.
+This addresses the missing-engine error seen in the previous source-only GitHub
+build. ZIP/folder import remains available. Bulk data is still downloaded at runtime.
 
 Downloads are foreground-only. Keep the launcher open; Pause retains partial
 downloads and verified staged parts. Activity destruction requests cancellation.
