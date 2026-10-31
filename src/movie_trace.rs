@@ -6,6 +6,7 @@
 // movie completion callback. "audio_ready" is NOT "movie_finished".
 use std::collections::{HashMap, VecDeque};
 use std::sync::{LazyLock, Mutex};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Instant;
 
 const MAX_EVENTS: usize = 24;
@@ -161,6 +162,10 @@ impl Trace {
 }
 
 static START: LazyLock<Instant> = LazyLock::new(Instant::now);
+// Engine prints identical cutscene timing states many times per second.
+// Filter before allocating an Event or locking the shared trace.
+static LAST_CUTSCENE_CLOCK_STATE: AtomicI32 = AtomicI32::new(-1);
+fn cutscene_clock_changed(previous: i32, next: i32) -> bool { previous != next }
 static TRACE: LazyLock<Mutex<Trace>> = LazyLock::new(|| Mutex::new(Trace::default()));
 
 /// Called only for coarse engine messages. Very frequent engine update/timer
@@ -172,7 +177,14 @@ pub(crate) fn observe_engine_line(line: &str) {
         && !line.contains("movie: Bink") {
         return;
     }
+    if line.contains("[cutscene] Updating cutscene time. state: ") {
+        let Some(state) = token_after(line, "state: ").and_then(|t| t.parse::<i32>().ok()) else { return; };
+        if !cutscene_clock_changed(LAST_CUTSCENE_CLOCK_STATE.swap(state, Ordering::Relaxed), state) { return; }
+    }
     let Some(event) = classify(line) else { return; };
+    if matches!(event.kind, Kind::CutsceneStopped | Kind::CutsceneUnloaded) {
+        LAST_CUTSCENE_CLOCK_STATE.store(-1, Ordering::Relaxed);
+    }
     let ms = START.elapsed().as_millis() as u64;
     let updated = {
         let mut state = TRACE.lock().unwrap();
@@ -241,6 +253,13 @@ mod tests {
         assert_eq!(safe_token("/game/private-name?.rpf"), "gameprivate-namerpf");
         assert!(safe_token(&"A".repeat(200)).len() <= 64);
         assert_eq!(safe_token(""), "none");
+    }
+
+    #[test]
+    fn repeated_cutscene_state_is_filtered_without_locking() {
+        assert!(!cutscene_clock_changed(8, 8));
+        assert!(cutscene_clock_changed(7, 8));
+        assert!(cutscene_clock_changed(-1, 7));
     }
 
     #[test]
