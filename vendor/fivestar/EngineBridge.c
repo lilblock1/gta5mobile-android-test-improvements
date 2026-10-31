@@ -57,7 +57,7 @@ static void native_log_to_file(const char *component, const char *line) {
       if (fseek(file, 0, SEEK_END) == 0) {
         long length = ftell(file);
         if (length >= 0 && length < PG_NATIVE_LOG_LIMIT)
-          fprintf(file, "[%s] %.1500s\\n", component, line);
+          fprintf(file, "[%s] %.1500s\n", component, line);
       }
       fclose(file);
     }
@@ -77,7 +77,7 @@ static void nativeSetLogPath(JNIEnv *env, jobject thiz, jstring path) {
     // mistaken for the current trial. The separate Wasmtime log is untouched.
     FILE *file = fopen(nativeLogPath, "w");
     if (file) {
-      fputs("[native] New native ARM64 engine session\\n", file);
+      fputs("[native] New native ARM64 engine session\n", file);
       fclose(file);
     }
   }
