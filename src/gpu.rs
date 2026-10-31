@@ -20,7 +20,6 @@ const BIND_DS: u32 = 0x40;
 const BIND_UAV: u32 = 0x80;
 const RING_CHUNK: u64 = 8 << 20;
 const UBO_WINDOW: u64 = 65536;
-const FRAME_SLOTS: usize = 3;
 const ZERO_VB_SIZE: u64 = 4096;
 const OCCLUSION_CAPACITY: u32 = 2048;
 const OCCLUSION_VISIBLE_COUNT: u64 = 65536;
@@ -357,6 +356,63 @@ fn start_with(mem: Arc<dyn RingMem>, ring: u64, size: u64, dbg: u64) {
 
 fn log(s: &str) {
     eprintln!("[wgpu] {s}");
+}
+
+// Phase 1 diagnostic-only watchdog. It never changes GPU scheduling or aborts the game.
+// A present *attempt* is not proof that the frame reached the screen.
+static WATCHDOG_PRESENT_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+static WATCHDOG_LAST_PRESENT_MS: AtomicU64 = AtomicU64::new(0);
+static WATCHDOG_LAST_GPU_TICK_MS: AtomicU64 = AtomicU64::new(0);
+static WATCHDOG_RING_HEAD: AtomicU64 = AtomicU64::new(0);
+static WATCHDOG_RING_TAIL: AtomicU64 = AtomicU64::new(0);
+static WATCHDOG_INFLIGHT: AtomicU64 = AtomicU64::new(0);
+static WATCHDOG_LAST_OPCODE: AtomicU64 = AtomicU64::new(0);
+// 0=loop, 1=idle ring wait, 2=execute commands, 3=present, 4=surface wait.
+static WATCHDOG_STAGE: AtomicU64 = AtomicU64::new(0);
+static WATCHDOG_STAGE_SINCE_MS: AtomicU64 = AtomicU64::new(0);
+static WATCHDOG_LAST_COMMAND_MS: AtomicU64 = AtomicU64::new(0);
+fn watchdog_stage(stage: u64) {
+    WATCHDOG_STAGE.store(stage, Ordering::Relaxed);
+    WATCHDOG_STAGE_SINCE_MS.store(watchdog_ms(), Ordering::Relaxed);
+}
+
+static WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
+static WATCHDOG_ORIGIN: LazyLock<Instant> = LazyLock::new(Instant::now);
+fn watchdog_ms() -> u64 { WATCHDOG_ORIGIN.elapsed().as_millis() as u64 }
+fn watchdog_tick() { WATCHDOG_LAST_GPU_TICK_MS.store(watchdog_ms(), Ordering::Relaxed); }
+fn watchdog_present_attempt() {
+    WATCHDOG_PRESENT_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+    WATCHDOG_LAST_PRESENT_MS.store(watchdog_ms(), Ordering::Relaxed);
+    if !WATCHDOG_STARTED.swap(true, Ordering::SeqCst) {
+        std::thread::Builder::new().name("nightlane-freeze-watchdog".into()).spawn(|| {
+            let mut last_reported = 0;
+            loop {
+                std::thread::sleep(Duration::from_secs(2));
+                if SUSPENDED.load(Ordering::Relaxed) || OCCLUDED.load(Ordering::Relaxed) { continue; }
+                let now = watchdog_ms();
+                let present_age = now.saturating_sub(WATCHDOG_LAST_PRESENT_MS.load(Ordering::Relaxed));
+                if present_age < 10_000 || now.saturating_sub(last_reported) < 30_000 { continue; }
+                last_reported = now;
+                let gpu_age = now.saturating_sub(WATCHDOG_LAST_GPU_TICK_MS.load(Ordering::Relaxed));
+                let count = WATCHDOG_PRESENT_ATTEMPTS.load(Ordering::Relaxed);
+                let movie_events = crate::host::movie_diagnostics_snapshot();
+                let ring_head = WATCHDOG_RING_HEAD.load(Ordering::Relaxed);
+                let ring_tail = WATCHDOG_RING_TAIL.load(Ordering::Relaxed);
+                let inflight = WATCHDOG_INFLIGHT.load(Ordering::Relaxed);
+                let last_opcode = WATCHDOG_LAST_OPCODE.load(Ordering::Relaxed);
+                let stage = WATCHDOG_STAGE.load(Ordering::Relaxed);
+                let stage_age = now.saturating_sub(WATCHDOG_STAGE_SINCE_MS.load(Ordering::Relaxed));
+                let command_age = now.saturating_sub(WATCHDOG_LAST_COMMAND_MS.load(Ordering::Relaxed));
+                let report = format!("[nightlane-freeze] no_present_attempt_ms={present_age} gpu_loop_last_tick_ms={gpu_age} present_attempts={count} suspended=false occluded=false movie_events={movie_events:?} ring_head={ring_head} ring_tail={ring_tail} gpu_inflight={inflight} last_opcode={last_opcode} gpu_stage={stage} gpu_stage_ms={stage_age} last_command_ms={command_age} diagnostic_only=true");
+                eprintln!("{report}");
+                // Persistent app-private report for later log export; best effort only.
+                if let Ok(root) = std::env::var("MUGUET_DATA") {
+                    let path = std::path::Path::new(&root).join("nightlane-freeze-report.txt");
+                    let _ = std::fs::write(path, format!("{report}\n"));
+                }
+            }
+        }).ok();
+    }
 }
 
 fn drain_forever(mem: &dyn RingMem, ring: u64) -> ! {
@@ -1199,7 +1255,6 @@ pub struct Gpu {
     view_dependents: HashMap<u32, HashSet<u32>>,
     ubo_slots: Vec<Vec<Chunk>>,
     ubo_shared: Vec<(Buffer, u64)>,
-    ubo_slot: usize,
     ubo_chunk: usize,
     ubo_off: u64,
     dummy_tex: HashMap<String, TextureView>,
@@ -1223,7 +1278,7 @@ pub struct Gpu {
     pending_maps: Vec<PendingMap>,
     counter_src: Option<Buffer>,
     counter_slot: u32,
-    frame_slot_done: Vec<Option<SubmissionIndex>>,
+    frame_queue: crate::frame_queue::FrameQueue<SubmissionIndex>,
     last_submit: Option<SubmissionIndex>,
     vb_avail: [u64; 16],
     dbg_idx: u64,
@@ -1413,6 +1468,9 @@ impl Gpu {
             }
             Some(job_tx)
         };
+        let frame_queue = crate::frame_queue::FrameQueue::new(
+            &std::env::var("NIGHTLANE_FRAME_QUEUE").unwrap_or_default());
+        log(&format!("frame queue: {} uniform slots, surface latency {}", frame_queue.slots(), frame_queue.surface_latency()));
         Ok(Gpu {
             instance: instance.clone(), pending_clears: HashMap::new(), clears_folded: 0, pipe_jobs, pipe_results, pipe_pending: HashMap::new(), pending_skips: 0, pending_skips0: 0,
             base, mem, ring, device, queue, adapter, surface, surface_format, surface_size: (0, 0),
@@ -1431,12 +1489,12 @@ impl Gpu {
             pipeline_fifo: VecDeque::new(), pipeline_evictions: 0,
             compute: HashMap::new(), bind_groups: FifoCache::new(BG_LIMIT),
             bg_dependents: HashMap::new(), view_dependents: HashMap::new(),
-            ubo_slots: (0..FRAME_SLOTS).map(|_| Vec::new()).collect(), ubo_shared: Vec::new(), ubo_slot: 0, ubo_chunk: 0, ubo_off: 0,
+            ubo_slots: (0..frame_queue.slots()).map(|_| Vec::new()).collect(), ubo_shared: Vec::new(), ubo_chunk: 0, ubo_off: 0,
             dummy_tex: HashMap::new(), dummy_smp: None, dummy_cmp: None, dummy_bufs: HashMap::new(), zero_vb: None, zero_src: None, scratch: None,
             proxy_pipelines: HashMap::new(), f2d_pipeline: None, blit: None, mip_pipelines: HashMap::new(), mip_sampler: None,
             occlusion_set: None, occlusion_next: 0, occlusion_active: None, occlusion_pass_slot: None,
             pending_resolve: Vec::new(), pending_events: Vec::new(), pending_maps: Vec::new(), counter_src: None, counter_slot: 0,
-            frame_slot_done: (0..FRAME_SLOTS).map(|_| None).collect(), last_submit: None, vb_avail: [0; 16],
+            frame_queue, last_submit: None, vb_avail: [0; 16],
             dbg_idx: if dbg != 0 { dbg + 424 } else { 0 },
             draws: 0, skipped: 0, presents: 0, pipe_creates: 0, fps_t0: Instant::now(), fps_n0: 0, fps_d0: 0,
             frame_waits: 0, frame_wait_ns: 0, frame_wait_max_ns: 0,
@@ -1732,6 +1790,8 @@ impl Gpu {
         self.hdr(2).store(1, Ordering::SeqCst);
         log("running");
         loop {
+            watchdog_tick();
+            watchdog_stage(0);
             #[cfg(target_os = "android")]
             if let Some(reply) = SURFACE_RELEASE.lock().unwrap().take() {
                 self.flush();
@@ -1784,6 +1844,9 @@ impl Gpu {
                 let _ = self.device.poll(PollType::Poll);
             }
             let head = self.hdr(0).load(Ordering::SeqCst);
+            WATCHDOG_RING_HEAD.store(head as u32 as u64, Ordering::Relaxed);
+            WATCHDOG_RING_TAIL.store(tail as u32 as u64, Ordering::Relaxed);
+            WATCHDOG_INFLIGHT.store(self.inflight.load(Ordering::Relaxed) as u64, Ordering::Relaxed);
             if head == tail {
                 if !self.pending_events.is_empty() || !self.pending_resolve.is_empty() {
                     self.flush();
@@ -1794,11 +1857,15 @@ impl Gpu {
                     continue;
                 }
                 let timeout = if self.pending_maps.is_empty() && self.inflight.load(Ordering::SeqCst) == 0 { 100 } else { 1 };
+                watchdog_stage(1);
                 let _ = self.mem.wait32(self.ring, tail as u32, Some(Duration::from_millis(timeout)));
+                watchdog_stage(0);
                 self.hdr(5).store(0, Ordering::SeqCst);
                 continue;
             }
+            watchdog_stage(2);
             tail = self.run_commands(tail, head);
+            watchdog_stage(0);
             self.hdr(1).store(tail, Ordering::SeqCst);
             let _ = self.mem.notify(self.ring + 4);
         }
@@ -1811,6 +1878,8 @@ impl Gpu {
         while tail != head {
             let base = ring_w + (tail as u64 >> 2);
             let op = self.u(base);
+            WATCHDOG_LAST_OPCODE.store(op as u64, Ordering::Relaxed);
+            WATCHDOG_LAST_COMMAND_MS.store(watchdog_ms(), Ordering::Relaxed);
             let n = self.u(base + 1) as u64;
             if op == 1 {
                 tail = RING_DATA as i32;
@@ -2337,13 +2406,26 @@ impl Gpu {
             Ok(s) => s,
             Err(e) => { log_once(&format!("nosrc{hash}"), &format!("shader source {hash}: {e}")); return None; }
         };
-        let (lowered, clip) = if self.device.features().contains(Features::CLIP_DISTANCES) {
-            (source.clone(), None)
-        } else {
-            Self::lower_clip_distances(&source)
+        let patched = if std::env::var("NIGHTLANE_SHADOW_FIX").unwrap_or_default() != "0" {
+            crate::shader_fixes::shadow_cascade(hash, &source)
+        } else { None };
+        let prepare = |src: &str| {
+            let (lowered, clip) = if self.device.features().contains(Features::CLIP_DISTANCES) {
+                (src.to_string(), None)
+            } else { Self::lower_clip_distances(src) };
+            let (text, pack) = pack_uniforms(&lowered);
+            (text, pack, clip)
         };
-        let (text, pack) = pack_uniforms(&lowered);
-        let module = self.scoped(&format!("shader {label}"), |d| d.create_shader_module(ShaderModuleDescriptor { label: Some(&label), source: ShaderSource::Wgsl(text.as_str().into()) }))?;
+        let (mut text, mut pack, mut clip) = prepare(patched.as_deref().unwrap_or(&source));
+        let mut module = self.scoped(&format!("shader {label}"), |d| d.create_shader_module(ShaderModuleDescriptor { label: Some(&label), source: ShaderSource::Wgsl(text.as_str().into()) }));
+        if patched.is_some() {
+            if module.is_none() {
+                log("shadow cascade fix rejected by driver; retrying original shader");
+                (text, pack, clip) = prepare(&source);
+                module = self.scoped(&format!("stock shader {label}"), |d| d.create_shader_module(ShaderModuleDescriptor { label: Some(&label), source: ShaderSource::Wgsl(text.as_str().into()) }));
+            } else { log("shadow cascade integer selection and receiver-plane bias guard applied"); }
+        }
+        let module = module?;
         let info = parse_wgsl(&text);
         let mut consts = None;
         if rec.as_ref().and_then(|r| r.get("consts")).map(|c| !c.is_null() && c != &serde_json::Value::Bool(false)).unwrap_or(false) {
@@ -2854,13 +2936,13 @@ impl Gpu {
 
     fn uniform_alloc(&mut self, size: u64) -> (usize, u64) {
         let size = (size + 255) & !255;
-        let slot = self.ubo_slot;
+        let slot = self.frame_queue.slot();
         let need_new = match self.ubo_slots[slot].get(self.ubo_chunk) { None => true, Some(_) => self.ubo_off + size + UBO_WINDOW > RING_CHUNK };
         if need_new {
             if self.ubo_slots[slot].get(self.ubo_chunk).is_some() { self.ubo_chunk += 1; self.ubo_off = 0; }
             if self.ubo_slots[slot].get(self.ubo_chunk).is_none() {
                 while self.ubo_shared.len() <= self.ubo_chunk {
-                    let buf = self.device.create_buffer(&BufferDescriptor { label: Some("uniform ring"), size: RING_CHUNK * FRAME_SLOTS as u64, usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST, mapped_at_creation: false });
+                    let buf = self.device.create_buffer(&BufferDescriptor { label: Some("uniform ring"), size: RING_CHUNK * self.frame_queue.slots() as u64, usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST, mapped_at_creation: false });
                     let id = self.uid();
                     self.ubo_shared.push((buf, id));
                 }
@@ -2897,7 +2979,7 @@ impl Gpu {
         // Write directly into persistent uniform staging memory instead of
         // allocating a temporary Vec and copying it again on every draw.
         let objects = &self.objs;
-        let chunk = &mut self.ubo_slots[self.ubo_slot][ci];
+        let chunk = &mut self.ubo_slots[self.frame_queue.slot()][ci];
         if chunk.stage.len() < end {
             chunk.stage.resize((end.max(262144)).next_power_of_two().min(RING_CHUNK as usize), 0);
         }
@@ -2968,7 +3050,7 @@ impl Gpu {
                         continue;
                     }
                     let (ci, off) = self.pack_copy(prog, stage)?;
-                    let c = &self.ubo_slots[self.ubo_slot][ci];
+                    let c = &self.ubo_slots[self.frame_queue.slot()][ci];
                     entries.push((0, Res::Buf(c.buf.clone(), 0, Some(prog.pack.as_ref().unwrap().size))));
                     dyn_off = Some((c.base + off) as u32);
                     key.push(c.id);
@@ -4039,6 +4121,7 @@ impl Gpu {
     }
 
     fn present(&mut self, id: u32) {
+        watchdog_present_attempt();
         if self.lost.load(Ordering::SeqCst) {
             self.flush();
             self.collect_pipelines();
@@ -4075,7 +4158,7 @@ impl Gpu {
                     } else {
                         PresentMode::Fifo
                     },
-                    desired_maximum_frame_latency: 2,
+                    desired_maximum_frame_latency: self.frame_queue.surface_latency(),
                     alpha_mode: caps.alpha_modes[0],
                     view_formats: vec![],
                     color_space: SurfaceColorSpace::Auto,
@@ -4165,11 +4248,10 @@ impl Gpu {
         // Record a fence only when this frame actually submitted GPU work.
         // Reusing the previous submission index on empty frames caused
         // redundant Wait polls even when no uniform data could be in flight.
-        self.frame_slot_done[self.ubo_slot] = self.last_submit.take();
-        self.ubo_slot = (self.ubo_slot + 1) % FRAME_SLOTS;
+        let reuse_fence = self.frame_queue.finish(self.last_submit.take());
         self.ubo_chunk = 0;
         self.ubo_off = 0;
-        if let Some(idx) = self.frame_slot_done[self.ubo_slot].take() {
+        if let Some(idx) = reuse_fence {
             let started = Instant::now();
             let _ = self.device.poll(PollType::Wait { submission_index: Some(idx), timeout: None });
             let elapsed = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;

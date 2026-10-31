@@ -55,15 +55,22 @@ fn serve_loop(mem: SharedMemory, table: u64) {
         "[worldstream-baseline] phase=0 io=original manifest_file_count={} max_open_handles={} interval_seconds=10",
         files.len(), MAX_OPEN,
     );
-    // This is an observation-only baseline. The read results, open-handle LRU
-    // and producer/consumer synchronization below are intentionally unchanged.
+    let read_ahead = std::env::var("NIGHTLANE_READ_AHEAD").unwrap_or_default() == "1";
+    let mut hint_budget = crate::read_ahead::Budget::new();
+    let (mut hint_calls, mut hint_bytes, mut hint_errors) = (0u64, 0u64, 0u64);
+    eprintln!("[io-read-ahead] enabled={read_ahead} max_hint_kib=512 global_kib_per_second=2048");
     let mut last_report = Instant::now();
     let mut last_report_reads = 0u64;
     let mut last_report_bytes = 0u64;
     let mut read_errors = 0u64;
+    // Phase 1 bounded diagnostics: no extra file reads or allocations per request.
+    let mut slow_reads = 0u64;
+    let mut longest_read_us = 0u128;
+    let mut max_pending_slots = 0u64;
+    let mut last_report_slow = 0u64;
     // Keep the most recently read files open. Eviction scans only happen
     // when the cache is full, never on the common streaming-read path.
-    let mut handles: HashMap<i32, (File, u64)> = HashMap::new();
+    let mut handles: HashMap<i32, (File, u64, crate::read_ahead::Sequential)> = HashMap::new();
     let mut access_clock: u64 = 0;
     let mut opened: u64 = 0;
     let mut evictions: u64 = 0;
@@ -72,6 +79,12 @@ fn serve_loop(mem: SharedMemory, table: u64) {
     loop {
         let seen = atomic_i32(&mem, table).load(Ordering::SeqCst);
         let n = atomic_i32(&mem, table + 4).load(Ordering::SeqCst).max(0) as u64;
+        // The producer owns request priorities; this worker must not reorder slots
+        // without proving the shared-memory protocol supports it.
+        let pending = (0..n).filter(|slot| {
+            atomic_i32(&mem, table + 64 + 64 * slot).load(Ordering::Relaxed) == 1
+        }).count() as u64;
+        max_pending_slots = max_pending_slots.max(pending);
         for slot in 0..n {
             let w = table + 64 + 64 * slot;
             if atomic_i32(&mem, w).compare_exchange(1, 3, Ordering::SeqCst, Ordering::SeqCst).is_err() {
@@ -82,6 +95,7 @@ fn serve_loop(mem: SharedMemory, table: u64) {
             let off = word(2) | (word(3) << 32);
             let dst = word(4) | (word(5) << 32);
             let mut len = word(6);
+            let read_started = Instant::now();
             let result: i64 = match files.get(id as usize) {
                 None => -1,
                 Some((path, size)) => {
@@ -95,37 +109,59 @@ fn serve_loop(mem: SharedMemory, table: u64) {
                             // This avoids reopening frequently streamed files
                             // during high file-count asset loading.
                             if handles.len() >= MAX_OPEN {
-                                if let Some(old) = handles.iter().min_by_key(|(_, (_, stamp))| *stamp).map(|(id, _)| *id) {
+                                if let Some(old) = handles.iter().min_by_key(|(_, (_, stamp, _))| *stamp).map(|(id, _)| *id) {
                                     handles.remove(&old);
                                     evictions += 1;
                                 }
                             }
                             match File::open(root.join(path)) {
-                                Ok(f) => { handles.insert(id, (f, access_clock)); opened += 1; }
+                                Ok(f) => { handles.insert(id, (f, access_clock, crate::read_ahead::Sequential::default())); opened += 1; }
                                 Err(e) => eprintln!("[io] open {path}: {e}"),
                             }
                         }
                         let (base, mlen) = mem_base_len(&mem);
-                        let Some((f, last_used)) = handles.get_mut(&id) else {
-                            atomic_i32(&mem, w + 28).store(-1, Ordering::SeqCst);
-                            atomic_i32(&mem, w).store(2, Ordering::SeqCst);
-                            let _ = mem.atomic_notify(w, 1);
-                            continue;
-                        };
-                        access_clock = access_clock.wrapping_add(1);
-                        *last_used = access_clock;
-                        if (dst + len) as usize > mlen {
-                            -1
-                        } else {
-                            let buf = unsafe { std::slice::from_raw_parts_mut(base.add(dst as usize), len as usize) };
-                            match f.read_exact_at(buf, off) {
-                                Ok(()) => len as i64,
-                                Err(e) => { eprintln!("[io] read {path}@{off}+{len}: {e}"); -1 }
+                        match handles.get_mut(&id) {
+                            // Use the common completion path so failed opens count
+                            // toward reads/errors and latency, and notify once.
+                            None => -1,
+                            Some((f, last_used, sequence)) => {
+                                access_clock = access_clock.wrapping_add(1);
+                                *last_used = access_clock;
+                                match crate::io_range::destination_range(dst, len, mlen) {
+                                    None => -1,
+                                    Some(range) => {
+                                        let buf = unsafe {
+                                            std::slice::from_raw_parts_mut(base.add(range.start), range.len())
+                                        };
+                                        match f.read_exact_at(buf, off) {
+                                            Ok(()) => {
+                                                if read_ahead {
+                                                    if let Some(range) = sequence.completed(off, len, *size)
+                                                        .and_then(|r| hint_budget.take(r, Instant::now())) {
+                                                        match crate::read_ahead::advise(f, range.clone()) {
+                                                            Ok(()) => {
+                                                                hint_calls += 1;
+                                                                hint_bytes += range.end - range.start;
+                                                                sequence.accepted(range.end);
+                                                            }
+                                                            Err(_) => { hint_errors += 1; sequence.reset(); }
+                                                        }
+                                                    }
+                                                }
+                                                len as i64
+                                            },
+                                            Err(e) => { sequence.reset(); eprintln!("[io] read {path}@{off}+{len}: {e}"); -1 }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                 }
             };
+            let read_us = read_started.elapsed().as_micros();
+            longest_read_us = longest_read_us.max(read_us);
+            if read_us >= 50_000 { slow_reads += 1; }
             served += 1;
             if result < 0 { read_errors += 1; }
             if result > 0 { bytes += result as u64; }
@@ -138,19 +174,24 @@ fn serve_loop(mem: SharedMemory, table: u64) {
         }
 
         // Phase 0 summary runs only on the already-dedicated I/O worker.
-        // It adds no per-file logs, extra disk reads or resident byte cache.
+        // Read-ahead counters distinguish kernel hints from bytes actually requested.
         if last_report.elapsed() >= Duration::from_secs(10) {
             let elapsed_ms = last_report.elapsed().as_millis();
             eprintln!(
-                "[worldstream-baseline] phase=0 mode={} interval_ms={} reads={} bytes={} total_reads={} total_bytes={} open_handles={} opens={} handle_evictions={} read_errors={}",
+                "[worldstream-baseline] phase=0 mode={} interval_ms={} reads={} bytes={} total_reads={} total_bytes={} open_handles={} opens={} handle_evictions={} read_errors={} slow_reads_50ms={} slow_reads_interval={} longest_read_us={} max_pending_slots={}",
                 worldstream.active.name(), elapsed_ms,
                 served.saturating_sub(last_report_reads),
                 bytes.saturating_sub(last_report_bytes),
                 served, bytes, handles.len(), opened, evictions, read_errors,
+                slow_reads, slow_reads.saturating_sub(last_report_slow), longest_read_us, max_pending_slots,
             );
+            eprintln!("[io-read-ahead] enabled={read_ahead} hints={hint_calls} hinted_bytes={hint_bytes} hint_errors={hint_errors}");
             last_report = Instant::now();
             last_report_reads = served;
             last_report_bytes = bytes;
+            last_report_slow = slow_reads;
+            longest_read_us = 0;
+            max_pending_slots = 0;
         }
         let _ = mem.atomic_wait32(table, seen as u32, Some(Duration::from_millis(20)));
     }
