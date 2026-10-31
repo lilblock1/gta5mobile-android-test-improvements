@@ -19,11 +19,11 @@ Game files (`game.wasm`, `data/`, shaders) are yours and never committed.
 - `vendor/fivestar/PGPort.h` — the Android substitutions for the three Apple
   APIs the host uses (`TARGET_OS_SIMULATOR`, `os_proc_available_memory`, and the
   dyld image base for trap logs).
-- `vendor/fivestar/PGGraphicsAndroid.h` + `PGGraphicsHeadless.c` — the graphics
-  seam. On iOS the Swift layer hands the renderer a `CAMetalLayer`; on Android it
-  hands the Vulkan renderer an `ANativeWindow`. Until the Vulkan renderer lands,
-  `PGGraphicsHeadless.c` provides a stub that accepts the command ring and does
-  not render.
+- `vendor/fivestar/PGGraphicsAndroid.h` + `PGGraphicsHeadless.c` — the
+  Android graphics seam. It connects the engine command ring to the
+  **existing Rust wgpu/Vulkan renderer** through `muguet_gpu_start`.
+  The headless stub is a fallback only when renderer symbols are absent;
+  it cannot draw game frames.
 - `vendor/fivestar/EngineBridge.c` — the JNI bridge. It is the only file that
   knows about both JNI and `EngineHost.h`. It exposes the engine to the Java
   shell: start/stop, attach the `ANativeWindow`, push controller state, pull
@@ -65,7 +65,8 @@ compiles until you run the wasm2c pipeline against your own game file**, and the
 pipeline is pinned to one specific build:
 
 - build id `8b0b5899ed`
-- `game.wasm` sha256 `11ca8d2c04c5e843d18ff4aea4899d72c86973c6b031df334e67c446b2ae83e0`
+- legacy native-host engine SHA-256 `dcd3dc966ae8ab78637137580da990f9acec2ecfba6c47d153bdc15e4b60ca02`
+- current bundled engine SHA-256 `11ca8d2c04c5e843d18ff4aea4899d72c86973c6b031df334e67c446b2ae83e0` (experimental opt-in only)
 
 `prepare_android.py` verifies the hash and refuses anything else, because the
 generated-code patches (notably `prepare_virtual_pad.py`, which hooks
@@ -75,7 +76,7 @@ different build, you must re-pin the patches by hand — do not force it.
 To generate the code (on Linux; CI or a dev box with the NDK):
 
 ```sh
-python3 app/Scripts/prepare_android.py --mirror /path/to/game-folder
+python3 app/Scripts/prepare_android.py --mirror /path/to/game-folder --allow-bundled-engine
 ```
 
 That folder must contain `data/` and `b/8b0b5899ed/game.wasm`.
@@ -97,19 +98,18 @@ generated game code to exist (see above). The result is an APK containing both
 ## What is done, and what is not
 
 Done:
-- Engine host sources vendored and compiling against the upstream iOS defines.
+- Engine host sources vendored; full native-game compilation and phone tests are pending.
 - The three Apple-only dependencies neutralized in `PGPort.h`.
 - The graphics seam isolated behind four functions, so nothing above it changes
   when the renderer arrives.
 - wasm2c pipeline ported for Linux/NDK.
 
-Not done (the renderer):
-- `MRRenderer.mm` (the ~99 KB Metal renderer that interprets the D3D11 command
-  ring) has **not** been ported. Android needs a Vulkan renderer that consumes
-  the same command ring. That is the bulk of the remaining work and is the reason
-  the port currently builds but does not draw.
-- Shader precompilation: the iOS build bakes MSL via Tint. Android needs SPIR-V.
-  Nothing is precompiled yet; the headless stub does not need it.
+Remaining unverified (renderer and game):
+- The Rust Vulkan bridge exists, but there is not yet a **device-tested**
+  working native wasm2c executable. CMake compilation and JNI/game start
+  still need experimental CI and physical phone validation.
+- The Android shader pipeline uses existing wgpu and WebGPU shaders,
+  not the upstream iOS Metal/MSL precompiler. Correctness needs testing.
 - `NativeAssets.m` (the Foundation streaming asset reader with the packed 4 KB
   block cache) is excluded. The Android app already downloads game files ahead of
   time via `GameDownloadService`, so on-device streaming is not yet needed; a
