@@ -65,6 +65,20 @@ static uint32_t waitFor(wasm_rt_shared_memory_t *memory, uint64_t offset,
     pthread_mutex_unlock(&queueLock);
     return 2;
   }
+  // The condition variable has CLOCK_MONOTONIC semantics. Its timed-wait
+  // argument must be an ABSOLUTE deadline (the old code passed a deadline
+  // through a helper that added current uptime AGAIN). Calculate it once so
+  // a spurious wakeup cannot extend the original timeout.
+  struct timespec deadline = {0};
+  if (timeout > 0) {
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += (time_t)(timeout / 1000000000ll);
+    deadline.tv_nsec += (long)(timeout % 1000000000ll);
+    if (deadline.tv_nsec >= 1000000000l) {
+      ++deadline.tv_sec;
+      deadline.tv_nsec -= 1000000000l;
+    }
+  }
   Waiter waiter = {.address = address, .notified = false, .next = waiters};
   pg_port_cond_init(&waiter.condition);
   waiters = &waiter;
@@ -73,15 +87,7 @@ static uint32_t waitFor(wasm_rt_shared_memory_t *memory, uint64_t offset,
     if (timeout < 0) {
       result = pthread_cond_wait(&waiter.condition, &queueLock);
     } else {
-      // Apple's relative wait uses monotonic time, so wall-clock changes cannot
-      // extend or shorten an engine sleep. Recalculate after a spurious wakeup.
-      struct timespec now;
-      clock_gettime(CLOCK_MONOTONIC, &now);
-      uint64_t elapsed = (uint64_t)(now.tv_sec) * 1000000000ull + (uint64_t)now.tv_nsec;
-      uint64_t start = elapsed + (uint64_t)timeout;
-      if (start <= elapsed) result = ETIMEDOUT;
-      else result = pg_port_cond_timedwait_relative(&waiter.condition, &queueLock,
-        (long)(start / 1000000000ull), (long)(start % 1000000000ull));
+      result = pthread_cond_timedwait(&waiter.condition, &queueLock, &deadline);
     }
   }
   Waiter **link = &waiters;
