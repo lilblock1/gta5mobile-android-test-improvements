@@ -35,6 +35,7 @@ pub(crate) fn observe_engine_line(line: &str) {
     if let Some(next) = next_profile_count(previous, line) {
         CONSECUTIVE_MOVIE_SLEEP_WINDOWS.store(next, Ordering::Relaxed);
         if previous < REQUIRED_WINDOWS && next >= REQUIRED_WINDOWS {
+            crate::movie_trace::suspected_stall();
             eprintln!("[nightlane-movie-stall] confirmed=1 consecutive_30s_profiles={} action=manual_recovery_only save_files=untouched",
                 next);
         } else if previous >= REQUIRED_WINDOWS && next == 0 {
