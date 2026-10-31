@@ -178,3 +178,83 @@ and (3) finishing/advancing that cutscene. The current Wasmtime host
 does not expose named movie/cutscene imports. A safe remedy must preserve
 scene, script, audio and collision consistency. Continue manual recovery
 as the only supported fallback in experimental APKs.
+
+## Newer archive: Logs.7z — 2026-10-31 08:46 US Central
+
+**Source:** user-uploaded `Logs.7z`, containing `Logs.txt`
+(182,593 text lines across seven appended game sessions). We have not
+uploaded raw game logs or private paths to GitHub.
+
+Latest session build SHA `92dd6d8e1f9b6f8d8d4e62454c4cd6c2af0371db`,
+Galaxy S25+ / Android 16, Turnip Mesa 27.0.0-devel, Wasmtime,
+30 FPS, render scale 0.5, game heap maximum 5 GiB,
+streamer fraction 35%, **original** WorldStream backend.
+
+### Strong independent reproduction
+
+| Trace stage | Approximate monotonic trace time |
+|---|---:|
+| Intro cutscene `ARMENIAN_3_INT_SEQ` audio event | 64.036 s |
+| Intro audio ready | 64.193 s |
+| Intro `audio_play` actually logged | 64.369 s |
+| Intro scene progressed through cutscene states and ended/unloaded | ~68.9 s |
+| `ARMENIAN_3_MCS_3` audio event | 190.571 s |
+| MCS3 audio prepared | 190.615 s |
+| MCS3 audio activated | 190.738 s |
+| MCS3 audio reported ready | 190.766 s |
+| MCS3 scene-created event (last tracked lifecycle event) | 190.836 s |
+| Suspected stall confirmed | ~270.0 s; 79.213 s since last lifecycle stage |
+
+The **successful intro** contains an explicit
+`Cutscene Audio Play: ARMENIAN_3_INT_SEQ_MASTERED_ONLY` plus
+cutscene-state changes and unload.
+The **stalled MCS3** has **no corresponding Play log**, and no subsequent
+cutscene-state update, **in the observed export**. Log absence is not proof
+of a missing internal callback.
+
+New facts around MCS3 immediately after audio readiness:
+- Repeated `CTVChannelInfo::SetDirty(true)` messages.
+- `SET_STATIC_EMITTER_ENABLED` disables
+  `SE_MICHAELS_HOUSE_RADIO` from the `ob_tv` script.
+- `Armenian3` script requests
+  `STOP_SCRIPTED_CONVERSATION` twice, at program counter `216328`.
+- Scripted conversations continue briefly; then the renderer reports
+  `no_present_attempt_ms` above 10,000, 40,000 and 70,000 ms.
+- Main-thread profiler becomes
+  `100% Update>Render Update>Movie Manager [sleep]` and render thread
+  waits for Main.
+- Read worker continues ~7 requests/10 seconds with **0 read errors,
+  0 slow reads over 50 ms**, **max 1 pending slot**, indicating the game
+  isn't blocked on significant asset I/O.
+- Last process PSS ~7,930,191 KiB (~7.56 GiB). This is high, but
+  the final session returned to launcher via the **manual recovery
+  button**, not a confirmed new OOM exit; Android's two `LOW_MEMORY`
+  entries are historical exit records.
+- Session reported `[nightlane-movie-trace-host] candidate_imports=0`;
+  no named movie/Bink host callback was available for direct tracing.
+
+### Follow-up instrumentation
+
+The experimental trace now adds three **single-occurrence, scoped** markers
+for the active `ARMENIAN_3_MCS_*` cutscene:
+`tv_channel_dirty`, `mission_conversation_reset`, and
+`tv_script_emitter`.
+These markers cannot flood the 24-entry trace history because each is
+recorded only once per MCS segment; they are ignored outside that segment.
+The stall summary includes corresponding boolean flags. A Rust test checks
+that repeated TV/script events do not evict the useful lifecycle events.
+
+**These markers are correlations, not suspected causes.** The game has an
+active TV script in Michael's house, and the movie manager may interact
+with Scaleform or other state; neither that relationship nor the reason
+for the sleep is established by the available log. No TV hook is changed,
+and no movie completion callback is fabricated.
+
+### Next decision
+
+We still need an **authoritative guest-side movie manager lifecycle / wait
+state** (which condition is unsatisfied, and what event should wake the
+main thread). Prioritize instrumentation of that specific WASM/guest
+boundary if discoverable. If only compiled guest code is available,
+document the limitation and avoid arbitrary game memory patches,
+fake playback completion, or forced checkpoint bypass.
