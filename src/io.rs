@@ -118,21 +118,25 @@ fn serve_loop(mem: SharedMemory, table: u64) {
                             }
                         }
                         let (base, mlen) = mem_base_len(&mem);
-                        let Some((f, last_used)) = handles.get_mut(&id) else {
-                            atomic_i32(&mem, w + 28).store(-1, Ordering::SeqCst);
-                            atomic_i32(&mem, w).store(2, Ordering::SeqCst);
-                            let _ = mem.atomic_notify(w, 1);
-                            continue;
-                        };
-                        access_clock = access_clock.wrapping_add(1);
-                        *last_used = access_clock;
-                        if (dst + len) as usize > mlen {
-                            -1
-                        } else {
-                            let buf = unsafe { std::slice::from_raw_parts_mut(base.add(dst as usize), len as usize) };
-                            match f.read_exact_at(buf, off) {
-                                Ok(()) => len as i64,
-                                Err(e) => { eprintln!("[io] read {path}@{off}+{len}: {e}"); -1 }
+                        match handles.get_mut(&id) {
+                            // Use the common completion path so failed opens count
+                            // toward reads/errors and latency, and notify once.
+                            None => -1,
+                            Some((f, last_used)) => {
+                                access_clock = access_clock.wrapping_add(1);
+                                *last_used = access_clock;
+                                match crate::io_range::destination_range(dst, len, mlen) {
+                                    None => -1,
+                                    Some(range) => {
+                                        let buf = unsafe {
+                                            std::slice::from_raw_parts_mut(base.add(range.start), range.len())
+                                        };
+                                        match f.read_exact_at(buf, off) {
+                                            Ok(()) => len as i64,
+                                            Err(e) => { eprintln!("[io] read {path}@{off}+{len}: {e}"); -1 }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
