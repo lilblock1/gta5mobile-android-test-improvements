@@ -32,6 +32,9 @@ enum Kind {
     CutsceneUnloaded,
     PrestreamCancelled,
     SceneCreated,
+    TvChannelDirty,
+    MissionConversationReset,
+    TvScriptEmitter,
 }
 impl Kind {
     fn name(self) -> &'static str {
@@ -52,6 +55,10 @@ impl Kind {
             Self::CutsceneUnloaded => "cutscene_unloaded",
             Self::PrestreamCancelled => "prestream_cancel",
             Self::SceneCreated => "scene_created",
+            Self::TvChannelDirty => "tv_channel_dirty",
+            Self::MissionConversationReset => "mission_conversation_reset",
+            Self::TvScriptEmitter => "tv_script_emitter",
+
         }
     }
 }
@@ -106,6 +113,13 @@ fn classify(line: &str) -> Option<Event> {
             (Kind::PrestreamCancelled, "srl")
         } else if line.contains("[Cutscene] Created ") && line.contains(" Draw Distance events") {
             (Kind::SceneCreated, "draw_distance_events")
+        } else if line.contains("CTVChannelInfo::SetDirty(true) called.") {
+            (Kind::TvChannelDirty, "tv_channel")
+        } else if line.contains("STOP_SCRIPTED_CONVERSATION called from SCRIPT: Script Name = Armenian3") {
+            (Kind::MissionConversationReset, "Armenian3")
+        } else if line.contains("SET_STATIC_EMITTER_ENABLED is disabling emitter SE_MICHAELS_HOUSE_RADIO")
+            && line.contains("Script Name = ob_tv") {
+            (Kind::TvScriptEmitter, "ob_tv")
         } else {
             return None;
         };
@@ -122,9 +136,27 @@ struct Trace {
     last_mission: String,
     last_cutscene: String,
     last_activity_ms: u64,
+    // These are one-shot breadcrumbs only while the current cutscene is an
+    // Armenian3 MCS segment. TV/mission script chatter outside that window
+    // must not drown out the useful cutscene lifecycle history.
+    armenian_mcs_active: bool,
+    tv_dirty_seen: bool,
+    mission_conversation_reset_seen: bool,
+    tv_script_emitter_seen: bool,
 }
 impl Trace {
     fn record(&mut self, ev: Event, ms: u64) -> Option<String> {
+        if matches!(ev.kind, Kind::TvChannelDirty | Kind::MissionConversationReset | Kind::TvScriptEmitter) {
+            if !self.armenian_mcs_active { return None; }
+            let already_seen = match ev.kind {
+                Kind::TvChannelDirty => &mut self.tv_dirty_seen,
+                Kind::MissionConversationReset => &mut self.mission_conversation_reset_seen,
+                Kind::TvScriptEmitter => &mut self.tv_script_emitter_seen,
+                _ => unreachable!(),
+            };
+            if *already_seen { return None; }
+            *already_seen = true;
+        }
         let key = (ev.kind, ev.context.clone());
         if let Some(previous) = self.dedup.get(&key) {
             if ms.saturating_sub(*previous) < DEDUP_MS {
@@ -144,13 +176,22 @@ impl Trace {
             Kind::RetryChosen => self.last_mission = "retry_selected".into(),
             Kind::AudioEvent => {
                 // Reset for the new audio event: playback of a *previous*
-                // cutscene does not establish that this one started.
+                // cutscene does not establish that this one started. Also
+                // scope TV/script breadcrumbs to the current Armenian3 MCS.
                 self.last_audio = ev.context.clone();
                 self.last_audio_play.clear();
+                self.armenian_mcs_active = ev.context.starts_with("ARMENIAN_3_MCS_");
+                self.tv_dirty_seen = false;
+                self.mission_conversation_reset_seen = false;
+                self.tv_script_emitter_seen = false;
             },
             Kind::AudioPrepare | Kind::AudioStopped => self.last_audio = ev.context.clone(),
             Kind::AudioPlay => self.last_audio_play = ev.context.clone(),
-            Kind::CutsceneState | Kind::CutsceneStopped | Kind::CutsceneUnloaded | Kind::PrestreamCancelled | Kind::SceneCreated =>
+            Kind::CutsceneStopped | Kind::CutsceneUnloaded => {
+                self.armenian_mcs_active = false;
+                self.last_cutscene = format!("{}:{}", ev.kind.name(), ev.context);
+            },
+            Kind::CutsceneState | Kind::PrestreamCancelled | Kind::SceneCreated =>
                 self.last_cutscene = format!("{}:{}", ev.kind.name(), ev.context),
             _ => {}
         }
@@ -166,13 +207,16 @@ impl Trace {
         let since_last_stage_ms = age_ms.saturating_sub(self.last_activity_ms);
         let tail = self.events.iter().rev().take(SNAPSHOT_EVENTS).rev()
             .cloned().collect::<Vec<_>>().join(" | ");
-        format!("count={} since_last_stage_ms={} last_mission={} last_audio={} last_audio_play_observed={} last_cutscene={} completion_callback=not_instrumented recent={:?}",
+        format!("count={} since_last_stage_ms={} last_mission={} last_audio={} last_audio_play_observed={} last_cutscene={} tv_dirty={} conversation_reset={} tv_script_emitter={} completion_callback=not_instrumented recent={:?}",
             self.sequence,
             since_last_stage_ms,
             if self.last_mission.is_empty() { "none" } else { &self.last_mission },
             if self.last_audio.is_empty() { "none" } else { &self.last_audio },
             if self.last_audio_play.is_empty() { "none" } else { &self.last_audio_play },
             if self.last_cutscene.is_empty() { "none" } else { &self.last_cutscene },
+            self.tv_dirty_seen,
+            self.mission_conversation_reset_seen,
+            self.tv_script_emitter_seen,
             tail)
     }
 }
@@ -190,7 +234,10 @@ static TRACE: LazyLock<Mutex<Trace>> = LazyLock::new(|| Mutex::new(Trace::defaul
 pub(crate) fn observe_engine_line(line: &str) {
     if !line.contains("Cutscene") && !line.contains("cutscene")
         && !line.contains("RETRY") && !line.contains("_FAIL")
-        && !line.contains("movie: Bink") {
+        && !line.contains("movie: Bink")
+        && !line.contains("CTVChannelInfo::SetDirty(true)")
+        && !line.contains("STOP_SCRIPTED_CONVERSATION")
+        && !line.contains("SET_STATIC_EMITTER_ENABLED") {
         return;
     }
     if line.contains("[cutscene] Updating cutscene time. state: ") {
@@ -282,6 +329,30 @@ mod tests {
         assert_eq!(safe_token("/game/private-name?.rpf"), "gameprivate-namerpf");
         assert!(safe_token(&"A".repeat(200)).len() <= 64);
         assert_eq!(safe_token(""), "none");
+    }
+
+    #[test]
+    fn tv_and_script_events_are_recorded_once_per_armenian_mcs_only() {
+        let mut trace = Trace::default();
+        let tv = classified("[eng] CTVChannelInfo::SetDirty(true) called. Dumping C++ and script stacks...");
+        let conversation = classified("[eng] [Audio_Conversation] STOP_SCRIPTED_CONVERSATION called from SCRIPT: Script Name = Armenian3 : Program Counter = 216328");
+        let emitter = classified("[eng] SET_STATIC_EMITTER_ENABLED is disabling emitter SE_MICHAELS_HOUSE_RADIO (from script SCRIPT: Script Name = ob_tv : Program Counter = 1025)");
+        assert_eq!(tv.kind, Kind::TvChannelDirty);
+        assert_eq!(conversation.kind, Kind::MissionConversationReset);
+        assert_eq!(emitter.kind, Kind::TvScriptEmitter);
+        assert!(trace.record(tv.clone(), 100).is_none());
+        trace.record(classified("[Audio_CutsceneAudio] Event ARMENIAN_3_MCS_3, Start offset 10367"), 110);
+        assert!(trace.record(tv.clone(), 200).is_some());
+        assert!(trace.record(tv, 3_500).is_none()); // still one per segment
+        assert!(trace.record(conversation, 4_500).is_some());
+        assert!(trace.record(emitter, 5_500).is_some());
+        assert!(trace.summary().contains("tv_dirty=true"));
+        assert!(trace.summary().contains("conversation_reset=true"));
+        assert!(trace.summary().contains("tv_script_emitter=true"));
+        trace.record(classified("[Audio_CutsceneAudio] Event ARMENIAN_3_MCS_4, Start offset 10367"), 7_000);
+        assert!(!trace.tv_dirty_seen);
+        assert!(!trace.mission_conversation_reset_seen);
+        assert!(!trace.tv_script_emitter_seen);
     }
 
     #[test]
