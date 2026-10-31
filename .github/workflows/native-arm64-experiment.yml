@@ -1,0 +1,147 @@
+name: Nightlane native ARM64 (wasm2c experimental)
+
+# Separate from the working Wasmtime APK. Never make the native path the
+# default, and never publish a "working GTA V" claim from build success alone.
+on:
+  push:
+    branches: [experimental/native-arm64-dual-runtime]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightlane-native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-candidate:
+    name: Compile dual-engine ARM64 APK (experimental)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
+      ENGINE_ZIP: /tmp/nightlane-engine-resources.zip
+      NATIVE_MIRROR: /tmp/nightlane-native-mirror
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check native backend source gates and current bundle
+        run: |
+          python3 -m unittest discover -s tools/tests -v
+          python3 tools/engine_resources.py prepare --output "$ENGINE_ZIP"
+
+      - name: Stage hash-verified game module for local wasm2c generation
+        run: |
+          python3 - <<'PY'
+          import hashlib, os, pathlib, zipfile
+          expected = "11ca8d2c04c5e843d18ff4aea4899d72c86973c6b031df334e67c446b2ae83e0"
+          member = "assets/b/8b0b5899ed/game.wasm"
+          dest = pathlib.Path(os.environ["NATIVE_MIRROR"]) / "b/8b0b5899ed/game.wasm"
+          dest.parent.mkdir(parents=True, exist_ok=True)
+          sha = hashlib.sha256()
+          with zipfile.ZipFile(os.environ["ENGINE_ZIP"]) as archive:
+              with archive.open(member) as src, dest.open("wb") as dst:
+                  while data := src.read(1 << 20):
+                      sha.update(data)
+                      dst.write(data)
+          if sha.hexdigest() != expected:
+              dest.unlink(missing_ok=True)
+              raise SystemExit("Native engine staging failed: game.wasm SHA-256 mismatch")
+          print("[native-engine] verified game.wasm SHA256", expected)
+          PY
+
+      - name: Install host wasm2c toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build unzip pkg-config libasound2-dev
+
+      - name: Generate native ARM64 game C with pinned, strict patchers
+        run: |
+          python3 app/Scripts/prepare_android.py --mirror "$NATIVE_MIRROR" --allow-bundled-engine
+          # Unimplemented imports must be resolved before claiming native boot.
+          python3 - <<'PY'
+          from pathlib import Path
+          report = Path("app/Build/import-status.tsv")
+          if not report.is_file():
+              raise SystemExit("Missing native import resolution report")
+          lines = report.read_text().splitlines()
+          bad = [x for x in lines if "\tunported:" in x]
+          print(f"[native-engine] total_imports={len(lines)} unported={len(bad)}")
+          for issue in bad[:40]:
+              print("::error::Unimplemented native engine import: " + issue)
+          if bad:
+              raise SystemExit("Native host import coverage incomplete; no false-ready APK")
+          PY
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - name: Install Android SDK and NDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358' 'platform-tools'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: native-arm64-candidate
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+      - name: Set up Android NDK
+        run: |
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+      - name: Restore repeatable APK signing if configured
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE" ]; then
+            printf '%s' "$KEYSTORE" | base64 -d > "$RUNNER_TEMP/native-keystore.jks"
+            echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/native-keystore.jks" >> "$GITHUB_ENV"
+          else
+            echo "::warning::No signing secret: Gradle uses a temporary debug certificate. Back up saves before replacing an installed test app."
+          fi
+
+      - name: Build both Wasmtime and native ARM64 core into test APK
+        run: >-
+          gradle -p android testDebugUnitTest assembleDebug
+          -PwithEngineCore=true
+          "-PengineResourcesZip=$ENGINE_ZIP"
+          --no-daemon --max-workers=2 --stacktrace
+
+      - name: Validate that BOTH runtime libraries were actually packaged
+        run: |
+          python3 tools/engine_resources.py verify-apk --apk android/app/build/outputs/apk/debug/app-debug.apk --resources "$ENGINE_ZIP"
+          python3 - <<'PY'
+          import zipfile
+          path = "android/app/build/outputs/apk/debug/app-debug.apk"
+          with zipfile.ZipFile(path) as apk:
+              names = set(apk.namelist())
+              required = {"lib/arm64-v8a/libmuguet.so", "lib/arm64-v8a/libgta5engine.so"}
+              missing = required - names
+              if missing:
+                  raise SystemExit(f"Native candidate APK incomplete: {sorted(missing)}")
+              print("[native-engine] Both Wasmtime and wasm2c ARM64 libraries are present")
+          PY
+
+      - name: Publish experimental dual-engine debug APK
+        uses: actions/upload-artifact@v5
+        with:
+          name: Nightlane-ARM64-Wasmtime-plus-wasm2c-EXPERIMENTAL
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Summary
+        run: |
+          echo '### Native ARM64 experiment' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Both execution backends are compiled into a **test** APK; Wasmtime remains default.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Native wasm2c is NOT proven playable until device tests pass. Back up game saves first.' >> "$GITHUB_STEP_SUMMARY"

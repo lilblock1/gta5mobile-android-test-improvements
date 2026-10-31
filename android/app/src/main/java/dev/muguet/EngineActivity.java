@@ -68,7 +68,7 @@ public final class EngineActivity extends Activity {
     private InputManagerCompat devices;
     private AudioTrack audio;
     private Thread audioThread;
-    private volatile boolean running, muted, surfaceReady;
+    private volatile boolean running, muted, surfaceReady, engineCoreLoaded;
     private boolean focused, controller, inCar;
     private int frameLimit = 30;
     private float lx, ly, rx, ry, lt, rt;
@@ -85,8 +85,10 @@ public final class EngineActivity extends Activity {
         long now = android.os.SystemClock.elapsedRealtime();
         if (now - lastMemoryWarningAt < 10000) return;
         lastMemoryWarningAt = now;
-        nativeMemoryPressure(level);
-        Log.i("Muguet", "[memory] Android trim level " + level + " forwarded to renderer");
+        if (engineCoreLoaded) {
+            nativeMemoryPressure(level);
+            Log.i("Muguet", "[memory] Android trim level " + level + " forwarded to renderer");
+        }
     }
 
     @Override public void onCreate(Bundle state) {
@@ -108,7 +110,9 @@ public final class EngineActivity extends Activity {
         surface = new SurfaceView(this);
         surface.getHolder().addCallback(new SurfaceHolder.Callback() {
             @Override public void surfaceCreated(SurfaceHolder h) {
-                nativeAttachSurface(h.getSurface()); surfaceReady = true;
+                surfaceReady = true;
+                // Surface creation can race JNI registration on startup.
+                if (engineCoreLoaded) nativeAttachSurface(h.getSurface());
             }
             @Override public void surfaceChanged(SurfaceHolder h, int f, int w, int ht) {
                 // The engine reads its back-buffer size at boot; after that the
@@ -116,7 +120,8 @@ public final class EngineActivity extends Activity {
                 // step so a future renderer picks the right extent.
             }
             @Override public void surfaceDestroyed(SurfaceHolder h) {
-                surfaceReady = false; nativeAttachSurface(null);
+                surfaceReady = false;
+                if (engineCoreLoaded) nativeAttachSurface(null);
             }
         });
         root.addView(surface, new FrameLayout.LayoutParams(
@@ -155,10 +160,13 @@ public final class EngineActivity extends Activity {
         setContentView(root);
 
         if (!loadEngineCore()) {
-            status.setText("This build has no native engine core (libgta5engine.so).");
+            status.setText("This build has no functional native engine core (libgta5engine.so).");
             finish();
             return;
         }
+        engineCoreLoaded = true;
+        if (surfaceReady && surface.getHolder().getSurface().isValid())
+            nativeAttachSurface(surface.getHolder().getSurface());
         startEngine();
     }
 
@@ -167,7 +175,9 @@ public final class EngineActivity extends Activity {
     private boolean loadEngineCore() {
         try {
             System.loadLibrary("gta5engine");
-            nativeRegister();
+            int registration = nativeRegister();
+            if (registration != 0) throw new IllegalStateException(
+                "native JNI method registration failed: " + registration);
             return true;
         } catch (Throwable t) {
             Log.e("Muguet", "native engine core not available: " + t);
@@ -177,7 +187,8 @@ public final class EngineActivity extends Activity {
 
     private void startEngine() {
         try {
-            nativeCacheActivity(this);
+            if (!nativeCacheActivity(this))
+                throw new IllegalStateException("Native engine could not register its Android activity");
             JSONObject config = readConfig();
             muted = config.optBoolean("mute", false);
             frameLimit = config.optInt("fps_limit", 30) <= 30 ? 30 : 60;
@@ -430,10 +441,13 @@ public final class EngineActivity extends Activity {
 
     // --- lifecycle -----------------------------------------------------------
     @Override protected void onResume() {
-        super.onResume(); running = true; devices.start(); handler.post(tick);
+        super.onResume();
+        if (!engineCoreLoaded) return;
+        running = true; devices.start(); handler.post(tick);
     }
     @Override protected void onPause() {
-        running = false; handler.removeCallbacks(tick); devices.stop(); clearInput();
+        running = false; handler.removeCallbacks(tick);
+        if (engineCoreLoaded) { devices.stop(); clearInput(); }
         if (audio != null) { try { audio.pause(); } catch (Exception ignored) {} }
         super.onPause();
     }
@@ -448,6 +462,10 @@ public final class EngineActivity extends Activity {
         if (audio != null) { try { audio.stop(); } catch (Exception ignored) {} }
         if (audioThread != null) audioThread.interrupt();
         super.onDestroy();
+        // Native wasm2c memory and pthreads are process-owned, and the core
+        // has no safe in-process reset. Isolate each new Play in a fresh
+        // :engine process, matching the existing Wasmtime :game lifecycle.
+        if (engineCoreLoaded) android.os.Process.killProcess(android.os.Process.myPid());
     }
     @Override public void onBackPressed() {
         // Back leaves the engine; the engine runs in its own process so a later

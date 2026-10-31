@@ -566,8 +566,13 @@ public final class LauncherActivity extends Activity {
         column.addView(pauseDownload);
         column.addView(play);
         playEngine = new Button(this);
-        playEngine.setText("Play (native wasm2c engine)");
-        playEngine.setOnClickListener(v -> launch(EngineActivity.class));
+        playEngine.setText("TEST NATIVE ARM64 (wasm2c) • experimental");
+        playEngine.setOnClickListener(v -> new AlertDialog.Builder(this)
+            .setTitle("Experimental native engine")
+            .setMessage("This uses compiled ARM64 wasm2c game code instead of Wasmtime. It has not yet passed real-device gameplay or save tests. Back up your saves before testing. Keep Wasmtime as your stable fallback.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Start native test", (dialog, which) -> launch(EngineActivity.class))
+            .show());
         column.addView(playEngine);
         if (!engineLibraryPresent()) {
             // This build ships only the wasmtime path. Offering the button would
@@ -753,6 +758,11 @@ public final class LauncherActivity extends Activity {
             settings.put("player_name", name.getText().toString().trim());
             settings.put("last_magnet", magnetField.getText().toString().trim());
             settings.put("touch_sensitivity", LookSensitivity.fromSlider(sensitivity.getProgress()));
+            // Both backend buttons use exactly the same local game data and
+            // settings. Record the chosen runtime for future log comparisons;
+            // this is metadata, not an instruction to auto-switch backends.
+            boolean nativeBackend = activity == EngineActivity.class;
+            settings.put("nightlane_execution_backend", nativeBackend ? "native_wasm2c" : "wasmtime");
             saveSettings();
             if (!nativePrepare(getFilesDir().getAbsolutePath())) {
                 String selectedFolder = folderPath();
@@ -762,6 +772,15 @@ public final class LauncherActivity extends Activity {
                 }
                 installOnFirstPlay(activity);
                 return;
+            }
+            String backend = activity == EngineActivity.class ? "native_wasm2c" : "wasmtime";
+            try (FileOutputStream output = new FileOutputStream(logFile(), true)) {
+                output.write(("[nightlane-engine] launching=" + backend
+                    + " native_library_present=" + engineLibraryPresent()
+                    + " experimental=" + (activity == EngineActivity.class) + "\n")
+                    .getBytes(StandardCharsets.UTF_8));
+            } catch (IOException logError) {
+                android.util.Log.w("Nightlane", "Unable to record backend launch", logError);
             }
             startActivity(new Intent(this, activity));
         } catch (Exception e) { error(e); }
