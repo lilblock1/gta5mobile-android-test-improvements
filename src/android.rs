@@ -10,6 +10,15 @@ use winit::platform::android::activity::AndroidApp;
 static ACTIVITY: OnceLock<AndroidApp> = OnceLock::new();
 static HELD: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
+// Read-only native signal for a manually triggered, opt-in recovery UI. A
+// missing or stalled game can never be reset without the player's confirmation.
+#[no_mangle]
+pub extern "system" fn Java_dev_muguet_GameActivity_nativeMovieManagerStalled(
+    _env: JNIEnv, _class: JClass,
+) -> jboolean {
+    if crate::movie_stall::suspected() { JNI_TRUE } else { JNI_FALSE }
+}
+
 pub fn activity() -> AndroidApp { ACTIVITY.get().expect("android_main not initialized").clone() }
 
 pub fn start_logging(dir: &str) {

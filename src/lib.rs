@@ -7,6 +7,7 @@ mod config;
 mod fs;
 mod gpu;
 mod nightlane_render;
+mod movie_stall;
 mod host;
 mod input;
 mod import;
