@@ -1,6 +1,7 @@
 """Generate fail-fast glue for imports not implemented by the native host yet."""
 from pathlib import Path
 import re
+from offline_syscalls import offline_unsupported_syscall, native_offline_return, status_label
 
 root = Path(__file__).resolve().parents[1]
 header = (root / 'Generated/game.h').read_text()
@@ -33,6 +34,12 @@ for module, field, result, name, signature in functions:
             f'  {"return " if result != "void" else ""}(({result} (*)({cast}))entry.func)({actual});'
         ])
         report.append(f'{module}.{field}\tforwarded to native engine table; EH remains unported')
+    elif offline_unsupported_syscall(module, field, result):
+        # The Wasmtime Android host returns -52 for unknown __syscall_*
+        # imports, including socket calls. Match that offline-only fallback
+        # without accidentally reporting that network operations succeeded.
+        output.append(native_offline_return(result))
+        report.append(f'{module}.{field}\t{status_label(module, field, result)}')
     else:
         output.append(f'  pg_missing_import("{module}.{field}");')
         if result != 'void': output.append('  return 0;')
