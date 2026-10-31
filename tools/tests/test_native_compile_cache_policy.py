@@ -4,6 +4,7 @@ These tests are intentionally offline; neither Android SDK nor generated
 proprietary game code is needed to verify CI safety properties.
 """
 from pathlib import Path
+import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -52,7 +53,9 @@ class NativeCompileCachePolicyTest(unittest.TestCase):
         self.assertIn("steps.native_c_cache.outputs.cache-primary-key", self.workflow)
 
     def test_partial_compiles_can_be_saved_without_publishing_failed_apks(self):
-        self.assertIn("timeout-minutes: 120", self.workflow)
+        timeouts = re.findall(r"^        timeout-minutes: (\\d+)$", self.workflow, re.M)
+        self.assertEqual(len(timeouts), 1, "Native build step needs an explicit timeout")
+        self.assertTrue(60 <= int(timeouts[0]) <= 180, "Compile timeout must leave time to persist ccache")
         self.assertIn("if: always() && steps.native_c_cache.outcome == 'success'", self.workflow)
         self.assertIn("Native compiler cache statistics", self.workflow)
         self.assertIn("Publish experimental dual-engine debug APK", self.workflow)
