@@ -23,8 +23,8 @@ jobs:
       CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_RELEASE_DEBUG: '0'
-      ENGINE_ZIP: ${{ runner.temp }}/nightlane-engine-resources.zip
-      NATIVE_MIRROR: ${{ runner.temp }}/nightlane-native-mirror
+      ENGINE_ZIP: /tmp/nightlane-engine-resources.zip
+      NATIVE_MIRROR: /tmp/nightlane-native-mirror
     steps:
       - uses: actions/checkout@v5
 
