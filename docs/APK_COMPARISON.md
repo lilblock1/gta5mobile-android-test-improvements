@@ -104,7 +104,7 @@ Android lifecycle behavior and gameplay still require physical-device validation
 | Frame generation (`gtav_fg`, `lsfg-android`) | Libraries and call sites observed; source compatibility, synchronization, license terms and device behavior were not established. No binaries or matching shader blobs copied. |
 | Custom-driver hooks / Adreno tools | Branch already has its own validated driver selection/proxy. No replacement with APK binaries. |
 | BCn decoder plugin and shader modifications | Existing source-based BC1–7 fallback retained. Added the source-visible cascade-selection/bias fix for shader `007089a30fcd7fd8`, guarded by exact normalized base source and validated with Naga. Driver rejection retries the original. No opaque BCn binary was integrated. |
-| High FPS, tiler and frame-queue environment variables | Added actual 1/2/3-slot uniform queues and matching 1/2 surface-latency requests. Each slot still waits on its own submission before reuse. Original 3-slot/latency-2 remains the default. Unconsumed tiler/high-FPS flags are not presented as implemented features. |
+| High FPS, tiler and frame-queue environment variables | Added actual 1/2/3-slot uniform queues and matching 1/2 surface-latency requests. Each slot still waits on its own submission before reuse. Two-slot/latency-2 is enabled by default; Original remains selectable. Unconsumed tiler/high-FPS flags are not presented as implemented features. |
 | Automatic `gameconfig.xml` pool and density rewrites | No runtime tuning pass copied: some changes increase pools/buffers, and mission/memory compatibility was not verified. The selected mirror already contains customized configs; their content is preserved, with only the two hash-pinned manifest lengths repaired. |
 | `largeHeap`, Vulkan requirement, graphics scale/FPS controls | Already present. Browser permissions, bundled certificates and browser-specific baseline profiles are not applicable renderer improvements. |
 
@@ -157,9 +157,10 @@ investigation.
 ## Native tuning follow-up (0.1.9)
 
 The launcher exposes independent controls for storage read-ahead, frame queue,
-physical-RAM heap limits and the shadow fix. The heap guard and exact-source
-shadow fix default on; read-ahead defaults off and the original queue remains
-selected. These are functional native implementations, not copied Java flags.
+physical-RAM heap limits and the shadow fix. The heap guard, exact-source
+shadow fix and read-ahead default on; the two-frame queue is selected by default.
+Existing configurations without these keys also receive these defaults. Explicit
+user choices are preserved. These are functional native implementations, not copied Java flags.
 Two slots allocate 16 MiB rather than 24 MiB per 8 MiB uniform-ring chunk;
 one slot allocates 8 MiB. This is an allocation calculation, not a measured
 whole-app RAM or FPS improvement. Kernel hints can be ignored or fail, and
@@ -188,7 +189,8 @@ read-ahead may add storage traffic. Counters record accepted hints and errors.
 ### Phone comparison procedure
 
 Install the 0.1.9 build over the previous test app. Keep the same save, graphics,
-scale, FPS target and driver. Start with Original queue and read-ahead off, then
+scale, FPS target and driver. The build starts with the optimizations enabled. For comparison, select Original
+queue and read-ahead off, then
 repeat the same drive with Lower latency, then with read-ahead enabled. Restart
 Play between settings. Check shadows while moving through changing sunlight.
 Export logs after each run and record visible artifacts, stalls, crashes and

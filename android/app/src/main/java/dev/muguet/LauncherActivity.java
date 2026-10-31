@@ -447,8 +447,8 @@ public final class LauncherActivity extends Activity {
         automaticHeap = check(column, "Reserve memory for Android and graphics (limit heap to physical RAM budget)",
             settings.optBoolean("android_auto_heap", true));
         readAhead = check(column, "Experimental storage read-ahead (may reduce streaming stalls; test on your phone)",
-            settings.optBoolean("nightlane_read_ahead", false));
-        String queueMode = settings.optString("nightlane_frame_queue", "original");
+            settings.optBoolean("nightlane_read_ahead", true));
+        String queueMode = settings.optString("nightlane_frame_queue", "low_latency");
         frameQueue = choice(column, "Frame queue (restart game to apply)",
             new String[]{"Original — 3 frames", "Lower latency — 2 frames", "Minimum latency — 1 frame (may reduce FPS)"},
             "minimal".equals(queueMode) ? 2 : "low_latency".equals(queueMode) ? 1 : 0);
