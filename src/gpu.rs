@@ -379,6 +379,18 @@ fn watchdog_stage(stage: u64) {
 static WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
 static WATCHDOG_ORIGIN: LazyLock<Instant> = LazyLock::new(Instant::now);
 fn watchdog_ms() -> u64 { WATCHDOG_ORIGIN.elapsed().as_millis() as u64 }
+
+/// Read-only liveness gate for the separate main-thread stall detector.
+/// A deliberately paused, minimized, backgrounded, or not-yet-presented
+/// activity must not be classified as a stuck loading screen.
+pub(crate) fn no_present_attempt_for_ms(min_ms: u64) -> bool {
+    WATCHDOG_STARTED.load(Ordering::Relaxed)
+        && WATCHDOG_PRESENT_ATTEMPTS.load(Ordering::Relaxed) > 0
+        && !SUSPENDED.load(Ordering::Relaxed)
+        && !OCCLUDED.load(Ordering::Relaxed)
+        && watchdog_ms().saturating_sub(WATCHDOG_LAST_PRESENT_MS.load(Ordering::Relaxed)) >= min_ms
+}
+
 fn watchdog_tick() { WATCHDOG_LAST_GPU_TICK_MS.store(watchdog_ms(), Ordering::Relaxed); }
 fn watchdog_present_attempt() {
     WATCHDOG_PRESENT_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
