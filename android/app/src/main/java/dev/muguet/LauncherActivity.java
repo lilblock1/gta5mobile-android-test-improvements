@@ -777,7 +777,7 @@ public final class LauncherActivity extends Activity {
             try (FileOutputStream output = new FileOutputStream(logFile(), true)) {
                 output.write(("[nightlane-engine] launching=" + backend
                     + " native_library_present=" + engineLibraryPresent()
-                    + " experimental=" + (activity == EngineActivity.class) + "\\n")
+                    + " experimental=" + (activity == EngineActivity.class) + "\n")
                     .getBytes(StandardCharsets.UTF_8));
             } catch (IOException logError) {
                 android.util.Log.w("Nightlane", "Unable to record backend launch", logError);
