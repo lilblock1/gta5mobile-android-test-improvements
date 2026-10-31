@@ -9,6 +9,7 @@ import android.util.Log;
 import android.view.*;
 import android.widget.FrameLayout;
 import android.widget.TextView;
+import android.widget.Button;
 import android.widget.Toast;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -28,11 +29,14 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
     static native boolean nativeHasFrame();
     static native long nativePresents();
     static native long[] nativePerfStats();
+    private static native boolean nativeMovieManagerStalled();
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final HashSet<Integer> padKeys = new HashSet<>();
     private final HashSet<String> keyboardKeys = new HashSet<>();
     private TouchControls controls;
     private TextView status, fpsText;
+    private Button movieRecovery;
+    private boolean movieRecoveryLogged;
     private ThermalStatus thermalStatus;
     private Phase0Telemetry phase0Telemetry;
     private InputManagerCompat devices;
@@ -126,6 +130,12 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
         fpsText.setMaxLines(2);
         fpsText.setGravity(Gravity.CENTER_HORIZONTAL);
         fpsText.setText("FPS  |  Thermal loading…  |  GPU statistics loading…");
+        movieRecovery = new Button(this);
+        movieRecovery.setText("Loading stalled? Return to launcher");
+        movieRecovery.setAllCaps(false);
+        movieRecovery.setTextSize(12);
+        movieRecovery.setVisibility(View.GONE);
+        movieRecovery.setOnClickListener(v -> confirmMovieRecovery());
         devices = new InputManagerCompat(this, this);
         // The native Vulkan surface owns the activity window, so HUD views added to
         // the content view sit below it. A panel sub-window composites above the
@@ -203,10 +213,16 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
             previous.removeView(controls);
             previous.removeView(status);
             previous.removeView(fpsText);
+            previous.removeView(movieRecovery);
         }
         layer.addView(controls, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         layer.addView(status, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER));
         layer.addView(fpsText, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.CENTER_HORIZONTAL));
+        FrameLayout.LayoutParams recoveryLayout = new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        recoveryLayout.bottomMargin = (int) (12 * getResources().getDisplayMetrics().density);
+        layer.addView(movieRecovery, recoveryLayout);
         layer.setBackground(new android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT));
         layer.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
             @Override public void onViewAttachedToWindow(View v) {}
@@ -279,6 +295,24 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
         try (OutputStream out = new FileOutputStream(new File(getFilesDir(), "muguet.log"), true)) {
             out.write((line + "\n").getBytes(StandardCharsets.UTF_8));
         } catch (IOException ignored) {}
+    }
+    // A prolonged Movie Manager sleep is an engine-state problem, not a
+    // renderer crash. Do not invent a game checkpoint restore or force quit.
+    // The player explicitly chooses to end this isolated :game process.
+    private void confirmMovieRecovery() {
+        new android.app.AlertDialog.Builder(this)
+            .setTitle("Movie / mission loading stalled")
+            .setMessage("Nightlane detected prolonged Movie Manager inactivity. Return to the launcher? Unsaved progress in this mission may be lost, but saved games and installed files will be left untouched.")
+            .setNegativeButton("Keep waiting", null)
+            .setPositiveButton("Return to launcher", (dialog, which) -> {
+                hudLog("movie-stall recovery: player confirmed return to launcher; unsaved progress may be lost");
+                android.content.Intent intent = new android.content.Intent(this, LauncherActivity.class);
+                intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                    | android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                startActivity(intent);
+                finish(); // onDestroy terminates only the isolated :game process.
+            })
+            .show();
     }
     public void setStatus(String text) { runOnUiThread(() -> { statusMessage = text; if (status != null) { status.setText(text); status.setVisibility(View.VISIBLE); } }); }
     @Override protected void onResume() {
@@ -430,5 +464,17 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
         if (fpsText != null) fpsText.setText(PerformanceHud.format(fps, stats, skipped, seconds, ThermalStatus.label(thermalLevel)));
         sampleProcessRam();
         if (phase0Telemetry != null) phase0Telemetry.sample();
+        // One read-only JNI check per second; no Android file, texture, GPU or
+        // game-script manipulation. This never restarts without a tap.
+        if (movieRecovery != null) {
+            boolean stalled = nativeMovieManagerStalled();
+            movieRecovery.setVisibility(stalled ? View.VISIBLE : View.GONE);
+            if (stalled && !movieRecoveryLogged) {
+                hudLog("movie-stall suspected: two consecutive >=95% Movie Manager sleep profiles; manual recovery available");
+                movieRecoveryLogged = true;
+            } else if (!stalled) {
+                movieRecoveryLogged = false;
+            }
+        }
     }
 }
