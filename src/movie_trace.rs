@@ -24,6 +24,7 @@ enum Kind {
     AudioPrepare,
     AudioActivated,
     AudioReady,
+    AudioPlay,
     AudioStopped,
     AudioReset,
     CutsceneState,
@@ -43,6 +44,7 @@ impl Kind {
             Self::AudioPrepare => "audio_prepare",
             Self::AudioActivated => "audio_activated",
             Self::AudioReady => "audio_ready",
+            Self::AudioPlay => "audio_play",
             Self::AudioStopped => "audio_stop",
             Self::AudioReset => "audio_reset",
             Self::CutsceneState => "cutscene_state",
@@ -88,6 +90,8 @@ fn classify(line: &str) -> Option<Event> {
             (Kind::AudioActivated, "track")
         } else if line.contains("Cutscene audio was asked if it was prepared and it replied: true") {
             (Kind::AudioReady, "true")
+        } else if line.contains("Cutscene Audio Play: ") {
+            (Kind::AudioPlay, token_after(line, "Cutscene Audio Play: ")?)
         } else if line.contains("Cutscene Audio Stop: ") {
             (Kind::AudioStopped, token_after(line, "Cutscene Audio Stop: ")?)
         } else if line.contains("Cutscene track reset") {
@@ -114,6 +118,7 @@ struct Trace {
     events: VecDeque<String>,
     dedup: HashMap<(Kind, String), u64>,
     last_audio: String,
+    last_audio_play: String,
     last_mission: String,
     last_cutscene: String,
     last_activity_ms: u64,
@@ -137,7 +142,14 @@ impl Trace {
         match ev.kind {
             Kind::MissionFailure => self.last_mission = ev.context.clone(),
             Kind::RetryChosen => self.last_mission = "retry_selected".into(),
-            Kind::AudioEvent | Kind::AudioPrepare | Kind::AudioStopped => self.last_audio = ev.context.clone(),
+            Kind::AudioEvent => {
+                // Reset for the new audio event: playback of a *previous*
+                // cutscene does not establish that this one started.
+                self.last_audio = ev.context.clone();
+                self.last_audio_play.clear();
+            },
+            Kind::AudioPrepare | Kind::AudioStopped => self.last_audio = ev.context.clone(),
+            Kind::AudioPlay => self.last_audio_play = ev.context.clone(),
             Kind::CutsceneState | Kind::CutsceneStopped | Kind::CutsceneUnloaded | Kind::PrestreamCancelled | Kind::SceneCreated =>
                 self.last_cutscene = format!("{}:{}", ev.kind.name(), ev.context),
             _ => {}
@@ -150,12 +162,16 @@ impl Trace {
     }
 
     fn summary(&self) -> String {
+        let age_ms = START.elapsed().as_millis() as u64;
+        let since_last_stage_ms = age_ms.saturating_sub(self.last_activity_ms);
         let tail = self.events.iter().rev().take(SNAPSHOT_EVENTS).rev()
             .cloned().collect::<Vec<_>>().join(" | ");
-        format!("count={} last_mission={} last_audio={} last_cutscene={} completion_callback=not_instrumented recent={:?}",
+        format!("count={} since_last_stage_ms={} last_mission={} last_audio={} last_audio_play_observed={} last_cutscene={} completion_callback=not_instrumented recent={:?}",
             self.sequence,
+            since_last_stage_ms,
             if self.last_mission.is_empty() { "none" } else { &self.last_mission },
             if self.last_audio.is_empty() { "none" } else { &self.last_audio },
+            if self.last_audio_play.is_empty() { "none" } else { &self.last_audio_play },
             if self.last_cutscene.is_empty() { "none" } else { &self.last_cutscene },
             tail)
     }
@@ -226,6 +242,7 @@ mod tests {
         assert_eq!(classified("[Audio_CutsceneAudio] Event ARMENIAN_3_MCS_4, Start offset 12034").context, "ARMENIAN_3_MCS_4");
         assert_eq!(classified("Cutscene Audio Prepare (new): ARMENIAN_3_MCS_4, type 1").kind, Kind::AudioPrepare);
         assert_eq!(classified("Prepared and activating cutscene track at load index 0").kind, Kind::AudioActivated);
+        assert_eq!(classified("[Audio_CutsceneAudio] Cutscene Audio Play: ARMENIAN_3_INT_SEQ_MASTERED_ONLY, type 1").kind, Kind::AudioPlay);
         assert_eq!(classified("[Audio_CutsceneAudio] Cutscene audio was asked if it was prepared and it replied: true").kind, Kind::AudioReady);
         assert!(classify("[Audio_CutsceneAudio] Cutscene audio was asked if it was prepared and it replied: false").is_none());
         assert_eq!(classified("Error: Unable to open movie: Bink is not available on the WebAssembly build").kind, Kind::MovieOpenUnavailable);
@@ -246,6 +263,18 @@ mod tests {
         assert_eq!(trace.events.len(), MAX_EVENTS);
         assert!(trace.dedup.len() <= MAX_KEYS);
         assert!(trace.summary().contains("completion_callback=not_instrumented"));
+    }
+
+    #[test]
+    fn new_cutscene_audio_ready_is_not_mistaken_for_previous_audio_play() {
+        let mut trace = Trace::default();
+        trace.record(classified("[Audio_CutsceneAudio] Event ARMENIAN_3_INT_SEQ, Start offset 36000"), 100);
+        trace.record(classified("[Audio_CutsceneAudio] Cutscene Audio Play: ARMENIAN_3_INT_SEQ_MASTERED_ONLY, type 1"), 150);
+        assert_eq!(trace.last_audio_play, "ARMENIAN_3_INT_SEQ_MASTERED_ONLY");
+        trace.record(classified("[Audio_CutsceneAudio] Event ARMENIAN_3_MCS_3, Start offset 10367"), 200);
+        assert_eq!(trace.last_audio_play, "");
+        trace.record(classified("[Audio_CutsceneAudio] Cutscene audio was asked if it was prepared and it replied: true"), 240);
+        assert_eq!(trace.last_audio_play, "");
     }
 
     #[test]
