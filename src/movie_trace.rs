@@ -65,7 +65,7 @@ fn token_after<'a>(line: &'a str, needle: &str) -> Option<&'a str> {
 /// Only emit simple engine-defined asset/mission identifiers, never arbitrary
 /// filesystem paths, logs of chat text, or long unbounded user-supplied strings.
 fn safe_token(raw: &str) -> String {
-    let token: String = raw.chars().filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')).take(64).collect();
+    let token: String = raw.chars().filter(|ch| ch.is_ascii_alphanumeric() || matches!(*ch, '_' | '-')).take(64).collect();
     if token.is_empty() { "none".into() } else { token }
 }
 
