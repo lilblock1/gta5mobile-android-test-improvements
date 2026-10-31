@@ -8,6 +8,7 @@ mod fs;
 mod gpu;
 mod nightlane_render;
 mod movie_stall;
+mod movie_trace;
 mod host;
 mod input;
 mod import;
@@ -203,6 +204,18 @@ pub fn make_runtime(startup: &config::Startup) -> Result<Arc<Runtime>> {
             other => anyhow::bail!("unsupported import {}.{}: {other:?}", imp.module(), imp.name()),
         }
     }
+    // Identifies the actual host boundary visible to Nightlane. Absence of
+    // candidate import names does NOT mean the game has no internal movie
+    // completion function; most RAGE movie state is inside the WASM module.
+    // One-time diagnostics only; no runtime host call intercepts are changed.
+    let movie_imports = imports.iter().filter_map(|imp| {
+        let name = imp.name.to_ascii_lowercase();
+        (name.contains("movie") || name.contains("bink") ||
+         name.contains("cutscene") || name.contains("video"))
+            .then(|| format!("{}.{}", imp.module, imp.name))
+    }).take(32).collect::<Vec<_>>();
+    eprintln!("[nightlane-movie-trace-host] candidate_imports={} names={:?} completion_visibility=unknown",
+        movie_imports.len(), movie_imports);
     let counts = imports.iter().map(|_| AtomicU64::new(0)).collect();
     let rt = Arc::new(Runtime {
         engine,
