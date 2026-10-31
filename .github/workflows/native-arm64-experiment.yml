@@ -4,7 +4,7 @@ name: Nightlane native ARM64 (wasm2c experimental)
 # default, and never publish a "working GTA V" claim from build success alone.
 on:
   push:
-    branches: [experimental/native-arm64-dual-runtime]
+    branches: [experimental/native-arm64-dual-runtime, fix/native-futex-startup-diagnostics]
   workflow_dispatch:
 
 permissions:
@@ -18,7 +18,7 @@ jobs:
   native-candidate:
     name: Compile dual-engine ARM64 APK (experimental)
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 210
     env:
       CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'
@@ -135,7 +135,7 @@ jobs:
           fi
 
       - name: Build both Wasmtime and native ARM64 core into test APK
-        timeout-minutes: 120
+        timeout-minutes: 175
         run: >-
           gradle -p android testDebugUnitTest assembleDebug
           -PwithEngineCore=true

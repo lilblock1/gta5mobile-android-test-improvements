@@ -46,6 +46,7 @@ public final class EngineActivity extends Activity {
     private static native int nativeRegister();
     private static native boolean nativeCacheActivity(Object activity);
     private static native void nativeSetHeapMb(int mb);
+    private static native void nativeSetLogPath(String path);
     private static native void nativeStart(String gameDir, String manifestPath, int startMode,
                                            int width, int height, int frameLimit);
     private static native void nativeAttachSurface(android.view.Surface surface);
@@ -76,6 +77,8 @@ public final class EngineActivity extends Activity {
     private final HashSet<Integer> padKeys = new HashSet<>();
     private float accLookX, accLookY;
     private long fpsAt, fpsFrames, skippedAt, lastFps;
+    private long nativeStartUptimeMs;
+    private boolean missingFrameWarningShown;
     private String statusMessage = "Starting engine…";
 
     private long lastMemoryWarningAt;
@@ -189,6 +192,9 @@ public final class EngineActivity extends Activity {
         try {
             if (!nativeCacheActivity(this))
                 throw new IllegalStateException("Native engine could not register its Android activity");
+            // Captures both the C engine and Rust Vulkan stderr, unlike the
+            // Wasmtime-only muguet.log. The launcher exports them together.
+            nativeSetLogPath(new File(getFilesDir(), "nightlane-native.log").getAbsolutePath());
             JSONObject config = readConfig();
             muted = config.optBoolean("mute", false);
             frameLimit = config.optInt("fps_limit", 30) <= 30 ? 30 : 60;
@@ -212,6 +218,7 @@ public final class EngineActivity extends Activity {
             int[] size = displaySize();
             int width = Math.max(320, surface.getWidth() > 0 ? surface.getWidth() : size[0]);
             int height = Math.max(180, surface.getHeight() > 0 ? surface.getHeight() : size[1]);
+            nativeStartUptimeMs = android.os.SystemClock.elapsedRealtime();
             nativeStart(gameDir.getAbsolutePath(), manifest.getAbsolutePath(), startMode,
                         width, height, frameLimit);
             if (!muted) startAudio();
@@ -423,6 +430,19 @@ public final class EngineActivity extends Activity {
         nativeThermalLevel(thermalLevel);
         long[] stats = nativePerfStats();
         if (stats == null || stats.length < PerformanceHud.STATS_COUNT) return;
+        // The native game can park on a perfectly ordinary futex while another
+        // thread fails to start. Don't call the futex a crash: identify the
+        // actual symptom (zero frames) and tell the tester how to get logs.
+        if (!missingFrameWarningShown && nativeStartUptimeMs > 0
+                && stats[0] == 0
+                && android.os.SystemClock.elapsedRealtime() - nativeStartUptimeMs > 45000
+                && !statusMessage.startsWith("Native boot stopped:")
+                && !statusMessage.startsWith("Graphics initialization failed:")
+                && !statusMessage.startsWith("Startup failed:")) {
+            missingFrameWarningShown = true;
+            setStatus("Native engine: no rendered frames after 45 seconds. "
+                + "Return to the launcher and Export logs; the new file includes renderer startup details.");
+        }
         if (fpsAt == 0) {
             fpsAt = now;
             fpsFrames = stats[0];

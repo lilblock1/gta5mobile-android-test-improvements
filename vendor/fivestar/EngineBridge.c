@@ -41,6 +41,51 @@ static jobject  g_activity = NULL;        // dev/muguet/EngineActivity instance 
 static jmethodID g_status_method = NULL;  // void onEngineStatus(String)
 static jmethodID g_set_status_method = NULL; // void setStatus(String)
 
+// Persist C engine and Rust renderer startup messages into a bounded,
+// app-private diagnostics file. The launcher can export this together with
+// the normal Wasmtime log; logcat access is not required on the phone.
+#define PG_NATIVE_LOG_LIMIT (8 * 1024 * 1024)
+static pthread_mutex_t nativeLogLock = PTHREAD_MUTEX_INITIALIZER;
+static char nativeLogPath[1024];
+
+static void native_log_to_file(const char *component, const char *line) {
+  if (!line) return;
+  pthread_mutex_lock(&nativeLogLock);
+  if (nativeLogPath[0]) {
+    FILE *file = fopen(nativeLogPath, "a");
+    if (file) {
+      if (fseek(file, 0, SEEK_END) == 0) {
+        long length = ftell(file);
+        if (length >= 0 && length < PG_NATIVE_LOG_LIMIT)
+          fprintf(file, "[%s] %.1500s\n", component, line);
+      }
+      fclose(file);
+    }
+  }
+  pthread_mutex_unlock(&nativeLogLock);
+}
+
+static void nativeSetLogPath(JNIEnv *env, jobject thiz, jstring path) {
+  (void)thiz;
+  if (!path) return;
+  const char *value = (*env)->GetStringUTFChars(env, path, NULL);
+  if (!value) return;
+  pthread_mutex_lock(&nativeLogLock);
+  if (strlen(value) < sizeof(nativeLogPath)) {
+    snprintf(nativeLogPath, sizeof(nativeLogPath), "%s", value);
+    // This file describes a single native launch so old failures cannot be
+    // mistaken for the current trial. The separate Wasmtime log is untouched.
+    FILE *file = fopen(nativeLogPath, "w");
+    if (file) {
+      fputs("[native] New native ARM64 engine session\n", file);
+      fclose(file);
+    }
+  }
+  pthread_mutex_unlock(&nativeLogLock);
+  (*env)->ReleaseStringUTFChars(env, path, value);
+}
+
+
 // Android sends an app process' stderr to /dev/null, so the renderer's own
 // prints (the Rust library logs through eprintln) would be invisible. Pipe
 // stderr into logcat instead: one line per line, tagged like the engine logs.
@@ -60,13 +105,19 @@ static void *stderr_pump(void *unused) {
       line[used] = 0;
       // The engine's own messages already reach logcat through its log
       // callback; only the renderer's lines are new here.
-      if (strncmp(line, "[native-port] ", 13)) LOGI("%s", line);
+      if (strncmp(line, "[native-port] ", 13)) {
+        LOGI("%s", line);
+        native_log_to_file("renderer", line);
+      }
       used = 0;
     } else if (used + 1 < sizeof line) {
       line[used++] = c;
     } else {
       line[used] = 0;
-      if (strncmp(line, "[native-port] ", 13)) LOGI("%s", line);
+      if (strncmp(line, "[native-port] ", 13)) {
+        LOGI("%s", line);
+        native_log_to_file("renderer", line);
+      }
       used = 0;
     }
   }
@@ -101,6 +152,10 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
 static void engine_log_bridge(const char *message, void *context) {
   if (!message) return;
   LOGI("%s", message);
+  native_log_to_file("native", message);
+  // Futex messages are tracing, not startup failures. Keep them in logs
+  // but don't cover the game with a misleading "futex wait" status.
+  if (strncmp(message, "Futex wait at ", 14) == 0) return;
   if (!g_vm || !g_activity || !g_set_status_method) return;
   JNIEnv *env = NULL;
   bool attached = false;
@@ -399,6 +454,7 @@ static JNINativeMethod g_methods[] = {
   {"nativeRegister",          "()I",                                  (void*)Java_dev_muguet_EngineActivity_nativeRegister},
   {"nativeCacheActivity",     "(Ljava/lang/Object;)Z",               (void*)nativeCacheActivity},
   {"nativeSetHeapMb",         "(I)V",                                 (void*)nativeSetHeapMb},
+  {"nativeSetLogPath",        "(Ljava/lang/String;)V",                (void*)nativeSetLogPath},
   {"nativeStart",             "(Ljava/lang/String;Ljava/lang/String;IIII)V", (void*)nativeStart},
   {"nativeAttachSurface",     "(Landroid/view/Surface;)V",            (void*)nativeAttachSurface},
   {"nativeUpdatePad",         "([Ljava/lang/String;IZFFZ)V",          (void*)nativeUpdatePad},

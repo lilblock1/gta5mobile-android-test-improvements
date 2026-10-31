@@ -18,6 +18,7 @@
 
 static void *pgRendererHandle;
 static bool pgRendererReported;
+static unsigned pgRendererMissingReports;
 static pthread_mutex_t pgRendererLock = PTHREAD_MUTEX_INITIALIZER;
 
 // Looks a renderer symbol up, opening the library the first time it is needed.
@@ -28,8 +29,15 @@ void *pg_renderer_symbol(const char *name) {
   if (!symbol) symbol = dlsym(RTLD_DEFAULT, name);
   if (!pgRendererReported) {
     pgRendererReported = true;
-    pg_log(symbol ? "Renderer library loaded; the engine draws through it."
-                  : "No renderer library in this build: the engine draws nothing.");
+    pg_log(symbol ? "Rust Vulkan renderer library found; waiting for GPU startup and real frames."
+                  : "Renderer library or exports unavailable; native graphics may fall back to headless.");
+  }
+  if (!symbol && pgRendererMissingReports++ < 6) {
+    char detail[256];
+    snprintf(detail, sizeof detail,
+             "Native renderer export missing: %s. Check libmuguet.so ABI and linker namespace.",
+             name);
+    pg_log(detail);
   }
   pthread_mutex_unlock(&pgRendererLock);
   return symbol;

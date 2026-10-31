@@ -608,7 +608,10 @@ static void *pgGraphicsRingWatcher(void *unused) {
   uint32_t last[4] = {0, 0, 0, 0};
   for (int i = 0; i < 120; i++) {
     usleep(500000);
-    if (ring + 16 > env.memory.size) break;
+    if (ring > env.memory.size || env.memory.size - ring < 16) {
+      pg_log("Native graphics watcher: ring address outside committed engine memory.");
+      break;
+    }
     uint8_t *base = (uint8_t *)(void *)env.memory.data;
     uint32_t words[4];
     for (int w = 0; w < 4; w++) words[w] = *(uint32_t *)(void *)(base + ring + 4 * w);
@@ -619,6 +622,16 @@ static void *pgGraphicsRingWatcher(void *unused) {
       pg_log(line);
       memcpy(last, words, sizeof last);
     }
+    // The current launcher can otherwise display a harmless, first-seen
+    // futex trace forever when no graphics frames start. Give the tester
+    // useful progress snapshots even if the ring never changes.
+    if (i == 19 || i == 59 || i == 119) {
+      char detail[224];
+      snprintf(detail, sizeof detail,
+               "Native graphics startup after %d s: ring head=%u tail=%u ready=%u done=%u.",
+               (i + 1) / 2, words[0], words[1], words[2], words[3]);
+      pg_log(detail);
+    }
   }
   return NULL;
 }
@@ -626,7 +639,8 @@ static void *pgGraphicsRingWatcher(void *unused) {
 void w2c_env_wgpu_start_worker(struct w2c_env *host,u64 ring,u64 size,u64 debug){
   pg_set_hooks_fn hooks=(pg_set_hooks_fn)pg_renderer_symbol("muguet_gpu_set_hooks");
   pg_gpu_start_fn start=(pg_gpu_start_fn)pg_renderer_symbol("muguet_gpu_start");
-  if(hooks)hooks(PGGraphicsWait,PGGraphicsNotify);
+  if (hooks) hooks(PGGraphicsWait, PGGraphicsNotify);
+  else pg_log("Native renderer found no futex hooks; graphics wakeups may stall.");
   if(start){
     pg_log("Connecting game graphics commands to the native GPU renderer.");
     pgGraphicsRing = ring;
