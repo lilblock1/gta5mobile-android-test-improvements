@@ -30,6 +30,8 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
     static native long nativePresents();
     static native long[] nativePerfStats();
     private static native boolean nativeMovieManagerStalled();
+    // 0=none, 1=Movie Manager, 2=PauseMenu (requires no GPU presents).
+    private static native int nativeLoadingStallKind();
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final HashSet<Integer> padKeys = new HashSet<>();
     private final HashSet<String> keyboardKeys = new HashSet<>();
@@ -301,8 +303,8 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
     // The player explicitly chooses to end this isolated :game process.
     private void confirmMovieRecovery() {
         new android.app.AlertDialog.Builder(this)
-            .setTitle("Movie / mission loading stalled")
-            .setMessage("Nightlane detected prolonged Movie Manager inactivity. Return to the launcher? Unsaved progress in this mission may be lost, but saved games and installed files will be left untouched.")
+            .setTitle("Mission / loading screen stalled")
+            .setMessage("Nightlane detected that the game stopped advancing. You can keep waiting or return to the launcher. Unsaved mission progress may be lost; existing save files and installed game data will be left untouched.")
             .setNegativeButton("Keep waiting", null)
             .setPositiveButton("Return to launcher", (dialog, which) -> {
                 hudLog("movie-stall recovery: player confirmed return to launcher; unsaved progress may be lost");
@@ -467,10 +469,15 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
         // One read-only JNI check per second; no Android file, texture, GPU or
         // game-script manipulation. This never restarts without a tap.
         if (movieRecovery != null) {
-            boolean stalled = nativeMovieManagerStalled();
+            int stallKind = nativeLoadingStallKind();
+            boolean stalled = stallKind == 1 || stallKind == 2;
             movieRecovery.setVisibility(stalled ? View.VISIBLE : View.GONE);
             if (stalled && !movieRecoveryLogged) {
-                hudLog("movie-stall suspected: two consecutive >=95% Movie Manager sleep profiles; manual recovery available");
+                String reason = stallKind == 2
+                    ? "pause_menu_sleep_and_no_present_60s"
+                    : "movie_manager_sleep";
+                hudLog("loading-stall suspected: kind=" + reason
+                    + " manual recovery available; no automatic restart");
                 movieRecoveryLogged = true;
             } else if (!stalled) {
                 movieRecoveryLogged = false;
