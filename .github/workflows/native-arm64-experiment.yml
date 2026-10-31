@@ -56,7 +56,31 @@ jobs:
       - name: Install host wasm2c toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang cmake ninja-build unzip pkg-config libasound2-dev
+          sudo apt-get install -y clang cmake ninja-build ccache unzip pkg-config libasound2-dev
+
+      # Each new run saves a fresh cache key; prefix restore reuses the latest
+      # snapshot after successful cache saves. Job cancellation can prevent cache upload.
+      # ccache still checks the exact compiler, flags, headers and source code.
+      - name: Restore compiled native C objects
+        id: native_c_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/nightlane-native-ccache
+          key: native-arm64-ndk28-wasm8b0-v1-${{ hashFiles('android/app/CMakeLists.txt', 'vendor/fivestar/**', 'app/Scripts/**') }}-${{ github.run_id }}
+          restore-keys: |
+            native-arm64-ndk28-wasm8b0-v1-${{ hashFiles('android/app/CMakeLists.txt', 'vendor/fivestar/**', 'app/Scripts/**') }}-
+            native-arm64-ndk28-wasm8b0-v1-
+
+      - name: Configure safe native compiler cache
+        run: |
+          echo "NIGHTLANE_NATIVE_CCACHE=1" >> "$GITHUB_ENV"
+          echo "CCACHE_DIR=/tmp/nightlane-native-ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_MAXSIZE=2G" >> "$GITHUB_ENV"
+          echo "CCACHE_COMPILERCHECK=content" >> "$GITHUB_ENV"
+          echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          mkdir -p /tmp/nightlane-native-ccache
+          CCACHE_DIR=/tmp/nightlane-native-ccache ccache --zero-stats
+          echo "[nightlane-native] ccache configured for NDK Clang. Baseline is cold unless restored."
 
       - name: Generate native ARM64 game C with pinned, strict patchers
         run: |
@@ -111,6 +135,7 @@ jobs:
           fi
 
       - name: Build both Wasmtime and native ARM64 core into test APK
+        timeout-minutes: 120
         run: >-
           gradle -p android testDebugUnitTest assembleDebug
           -PwithEngineCore=true
@@ -145,3 +170,18 @@ jobs:
           echo '### Native ARM64 experiment' >> "$GITHUB_STEP_SUMMARY"
           echo 'Both execution backends are compiled into a **test** APK; Wasmtime remains default.' >> "$GITHUB_STEP_SUMMARY"
           echo 'Native wasm2c is NOT proven playable until device tests pass. Back up game saves first.' >> "$GITHUB_STEP_SUMMARY"
+
+      # Save even after compilation/link failure: partial Clang object output
+      # from a long-running build is still useful and validated by ccache.
+      - name: Native compiler cache statistics
+        if: always() && steps.native_c_cache.outcome == 'success'
+        run: |
+          CCACHE_DIR=/tmp/nightlane-native-ccache ccache --show-stats || true
+          du -sh /tmp/nightlane-native-ccache || true
+
+      - name: Persist compiled native C objects for next run
+        if: always() && steps.native_c_cache.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/nightlane-native-ccache
+          key: ${{ steps.native_c_cache.outputs.cache-primary-key }}
