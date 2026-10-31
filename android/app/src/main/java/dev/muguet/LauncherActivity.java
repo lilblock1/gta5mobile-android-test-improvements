@@ -396,7 +396,10 @@ public final class LauncherActivity extends Activity {
         exportLogsButton.setText("Export logs");
         exportLogsButton.setOnClickListener(v -> {
             File log = logFile();
-            if (!log.isFile() || log.length() == 0) {
+            File nativeLog = nativeLogFile();
+            boolean hasNormal = log.isFile() && log.length() > 0;
+            boolean hasNative = nativeLog.isFile() && nativeLog.length() > 0;
+            if (!hasNormal && !hasNative) {
                 status.setText("No logs yet. Launch the game once, then export.");
                 return;
             }
@@ -1000,6 +1003,7 @@ public final class LauncherActivity extends Activity {
     // would silently miss the real save.
     private File saves() { return new File(getFilesDir(), "saves"); }
     private File logFile() { return new File(getFilesDir(), "muguet.log"); }
+    private File nativeLogFile() { return new File(getFilesDir(), "nightlane-native.log"); }
     private static void walkFiles(File dir, ArrayList<File> out) {
         File[] kids = dir.listFiles();
         if (kids == null) return;
@@ -1054,15 +1058,25 @@ public final class LauncherActivity extends Activity {
         status.setText("Exporting logs…");
         worker.execute(() -> {
             Exception failure = null;
-            try (InputStream in = new FileInputStream(logFile());
-                 OutputStream out = getContentResolver().openOutputStream(target)) {
+            try (OutputStream out = getContentResolver().openOutputStream(target)) {
                 if (out == null) throw new IOException("That location refused to be written to");
                 byte[] buffer = new byte[1 << 20];
-                int n;
-                while ((n = in.read(buffer)) != -1) out.write(buffer, 0, n);
-                // The game's own log can end without an allocation error when
-                // Android terminates its :game process. Include the system's
-                // recorded reason to distinguish memory pressure from a crash.
+                boolean included = false;
+                // Native wasm2c has its own process and renders via Rust, whose
+                // stderr is redirected to logcat. Its JNI bridge now persists
+                // both C boot messages and Rust Vulkan logs for phone-only tests.
+                for (File log : new File[]{logFile(), nativeLogFile()}) {
+                    if (!log.isFile() || log.length() <= 0) continue;
+                    included = true;
+                    out.write(("\\n----- " + log.getName() + " -----\\n").getBytes(StandardCharsets.UTF_8));
+                    try (InputStream in = new FileInputStream(log)) {
+                        int n;
+                        while ((n = in.read(buffer)) != -1) out.write(buffer, 0, n);
+                    }
+                }
+                if (!included) throw new IOException("No game or native engine logs were found");
+                // Include system-reported process exit reasons, even when the
+                // game exits without producing a native stack trace.
                 appendGameExitInfo(out);
             } catch (Exception e) { failure = e; }
             final Exception problem = failure;
