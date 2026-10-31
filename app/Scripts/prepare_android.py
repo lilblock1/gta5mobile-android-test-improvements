@@ -45,7 +45,24 @@ UPSTREAM = ROOT.parent / "vendor" / "fivestar"
 # section and every function the patchers touch are unchanged, so the pins
 # below still hold.
 PINNED_WASM_SHA256 = "dcd3dc966ae8ab78637137580da990f9acec2ecfba6c47d153bdc15e4b60ca02"
+# Experimental alternate: hash verified by tools/engine_resources.py. This
+# fingerprint alone does not prove wasm2c patch compatibility or gameplay.
+BUNDLED_WASM_SHA256 = "11ca8d2c04c5e843d18ff4aea4899d72c86973c6b031df334e67c446b2ae83e0"
 BUILD_ID = "8b0b5899ed"
+
+
+def verify_engine_digest(digest: str, *, allow_bundled: bool = False) -> str:
+    """Reject unknown binaries even when their build-ID directory matches."""
+    if digest == PINNED_WASM_SHA256:
+        return "legacy"
+    if allow_bundled and digest == BUNDLED_WASM_SHA256:
+        return "bundled-experimental"
+    raise ValueError(
+        "Unsupported native wasm2c game binary. "
+        f"legacy={PINNED_WASM_SHA256}, "
+        f"bundled={BUNDLED_WASM_SHA256} (opt-in only), found={digest}. "
+        "Do not bypass the fingerprint or generated-code-body checks."
+    )
 
 
 def run(*args: list[str], cwd: Path = ROOT) -> None:
@@ -101,20 +118,25 @@ def host_wabt_asset() -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mirror", type=Path, required=True, help="folder with data/ and b/<build>/game.wasm")
+    parser.add_argument("--mirror", type=Path, required=True, help="folder containing b/<build>/game.wasm")
+    parser.add_argument("--allow-bundled-engine", action="store_true",
+                        help="Experimental: permit the exact verified bundled engine and re-run all strict wasm2c patchers")
     options = parser.parse_args()
 
     engine = options.mirror / f"b/{BUILD_ID}/game.wasm"
     if not engine.is_file():
         raise SystemExit(f"Missing {engine}. The engine core is pinned to build {BUILD_ID}.")
-    digest = hashlib.sha256(engine.read_bytes()).hexdigest()
-    if digest != PINNED_WASM_SHA256:
-        raise SystemExit(
-            "The engine does not match the build this core supports.\n"
-            f"  expected {PINNED_WASM_SHA256}\n  found    {digest}\n"
-            "Update PINNED_WASM_SHA256 and re-check the generated-code patches "
-            "(prepare_virtual_pad.py matches ioPad::Update by body) before forcing it."
-        )
+    # Avoid temporarily allocating a second copy of the full game module.
+    hasher = hashlib.sha256()
+    with engine.open("rb") as source:
+        for chunk in iter(lambda: source.read(1 << 20), b""):
+            hasher.update(chunk)
+    digest = hasher.hexdigest()
+    try:
+        profile = verify_engine_digest(digest, allow_bundled=options.allow_bundled_engine)
+    except ValueError as error:
+        raise SystemExit(str(error))
+    print(f"[native-engine] profile={profile} sha256={digest} generated_body_checks=required")
 
     for name in ("Tools", "Generated", "Build"):
         (ROOT / name).mkdir(exist_ok=True)
@@ -229,6 +251,10 @@ def main() -> int:
     # Last, like upstream: it rewrites the invoke_* wrappers in Imports.c so
     # they keep a native jump point for the engine's setjmp/longjmp.
     run(sys.executable, str(SCRIPTS / "prepare_longjmp.py"))
+
+    # The strict generated-code patches above raise for changed ioPad/budget
+    # function bodies. An opt-in hash alone is never enough to ship a build.
+    print(f"[native-engine] strict_patch_checks=passed profile={profile}")
 
     # 9. Emit the CMake source list the NDK build consumes.
     #    game_*.c is the engine; Imports.c holds the typed wasm import bindings
