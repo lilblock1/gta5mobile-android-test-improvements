@@ -367,6 +367,15 @@ static WATCHDOG_RING_HEAD: AtomicU64 = AtomicU64::new(0);
 static WATCHDOG_RING_TAIL: AtomicU64 = AtomicU64::new(0);
 static WATCHDOG_INFLIGHT: AtomicU64 = AtomicU64::new(0);
 static WATCHDOG_LAST_OPCODE: AtomicU64 = AtomicU64::new(0);
+// 0=loop, 1=idle ring wait, 2=execute commands, 3=present, 4=surface wait.
+static WATCHDOG_STAGE: AtomicU64 = AtomicU64::new(0);
+static WATCHDOG_STAGE_SINCE_MS: AtomicU64 = AtomicU64::new(0);
+static WATCHDOG_LAST_COMMAND_MS: AtomicU64 = AtomicU64::new(0);
+fn watchdog_stage(stage: u64) {
+    WATCHDOG_STAGE.store(stage, Ordering::Relaxed);
+    WATCHDOG_STAGE_SINCE_MS.store(watchdog_ms(), Ordering::Relaxed);
+}
+
 static WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
 static WATCHDOG_ORIGIN: LazyLock<Instant> = LazyLock::new(Instant::now);
 fn watchdog_ms() -> u64 { WATCHDOG_ORIGIN.elapsed().as_millis() as u64 }
@@ -391,7 +400,10 @@ fn watchdog_present_attempt() {
                 let ring_tail = WATCHDOG_RING_TAIL.load(Ordering::Relaxed);
                 let inflight = WATCHDOG_INFLIGHT.load(Ordering::Relaxed);
                 let last_opcode = WATCHDOG_LAST_OPCODE.load(Ordering::Relaxed);
-                let report = format!("[nightlane-freeze] no_present_attempt_ms={present_age} gpu_loop_last_tick_ms={gpu_age} present_attempts={count} suspended=false occluded=false movie_events={movie_events:?} ring_head={ring_head} ring_tail={ring_tail} gpu_inflight={inflight} last_opcode={last_opcode} diagnostic_only=true");
+                let stage = WATCHDOG_STAGE.load(Ordering::Relaxed);
+                let stage_age = now.saturating_sub(WATCHDOG_STAGE_SINCE_MS.load(Ordering::Relaxed));
+                let command_age = now.saturating_sub(WATCHDOG_LAST_COMMAND_MS.load(Ordering::Relaxed));
+                let report = format!("[nightlane-freeze] no_present_attempt_ms={present_age} gpu_loop_last_tick_ms={gpu_age} present_attempts={count} suspended=false occluded=false movie_events={movie_events:?} ring_head={ring_head} ring_tail={ring_tail} gpu_inflight={inflight} last_opcode={last_opcode} gpu_stage={stage} gpu_stage_ms={stage_age} last_command_ms={command_age} diagnostic_only=true");
                 eprintln!("{report}");
                 // Persistent app-private report for later log export; best effort only.
                 if let Ok(root) = std::env::var("MUGUET_DATA") {
@@ -1779,6 +1791,7 @@ impl Gpu {
         log("running");
         loop {
             watchdog_tick();
+            watchdog_stage(0);
             #[cfg(target_os = "android")]
             if let Some(reply) = SURFACE_RELEASE.lock().unwrap().take() {
                 self.flush();
@@ -1844,11 +1857,15 @@ impl Gpu {
                     continue;
                 }
                 let timeout = if self.pending_maps.is_empty() && self.inflight.load(Ordering::SeqCst) == 0 { 100 } else { 1 };
+                watchdog_stage(1);
                 let _ = self.mem.wait32(self.ring, tail as u32, Some(Duration::from_millis(timeout)));
+                watchdog_stage(0);
                 self.hdr(5).store(0, Ordering::SeqCst);
                 continue;
             }
+            watchdog_stage(2);
             tail = self.run_commands(tail, head);
+            watchdog_stage(0);
             self.hdr(1).store(tail, Ordering::SeqCst);
             let _ = self.mem.notify(self.ring + 4);
         }
@@ -1862,6 +1879,7 @@ impl Gpu {
             let base = ring_w + (tail as u64 >> 2);
             let op = self.u(base);
             WATCHDOG_LAST_OPCODE.store(op as u64, Ordering::Relaxed);
+            WATCHDOG_LAST_COMMAND_MS.store(watchdog_ms(), Ordering::Relaxed);
             let n = self.u(base + 1) as u64;
             if op == 1 {
                 tail = RING_DATA as i32;
