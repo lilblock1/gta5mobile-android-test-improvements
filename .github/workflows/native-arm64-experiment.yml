@@ -59,7 +59,7 @@ jobs:
           sudo apt-get install -y clang cmake ninja-build ccache unzip pkg-config libasound2-dev
 
       # Each new run saves a fresh cache key; prefix restore reuses the latest
-      # snapshot, even when the previous compile failed or hit the job timeout.
+      # snapshot after successful cache saves. Job cancellation can prevent cache upload.
       # ccache still checks the exact compiler, flags, headers and source code.
       - name: Restore compiled native C objects
         id: native_c_cache
@@ -135,6 +135,7 @@ jobs:
           fi
 
       - name: Build both Wasmtime and native ARM64 core into test APK
+        timeout-minutes: 120
         run: >-
           gradle -p android testDebugUnitTest assembleDebug
           -PwithEngineCore=true
