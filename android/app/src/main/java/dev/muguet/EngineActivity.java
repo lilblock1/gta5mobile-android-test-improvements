@@ -375,6 +375,10 @@ public final class EngineActivity extends Activity {
             Math.max(0.0, Math.min(0.5, sharpness))));
         vars.add("NIGHTLANE_THERMAL_ADAPTIVE="
             + (cfg.optBoolean("nightlane_thermal_adaptive", true) ? "1" : "0"));
+        // Existing launcher toggle now controls the native filesystem too.
+        // This is an OS cache hint, not a speculative user-data download.
+        vars.add("PG_HTTPFS_READAHEAD_KB=" +
+            (cfg.optBoolean("nightlane_read_ahead", true) ? "64" : "0"));
         int pipelines = cfg.optInt("nightlane_pipeline_workers", 2);
         vars.add("NIGHTLANE_PIPELINE_WORKERS=" +
             (pipelines == 1 || pipelines == 4 ? pipelines : 2));
