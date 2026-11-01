@@ -59,6 +59,7 @@ public final class EngineActivity extends Activity {
     private static native int nativeAudio(short[] out, int maxFrames);
     private static native long nativeAudioBufferState();
     private static native long nativeAudioProducedFrames();
+    private static native long nativeAudioCallbackCount();
     private static native void nativeAudioReport(String message);
     private static native boolean nativePauseMenuActive();
     private static native int nativeLastInputDevice();
@@ -504,6 +505,7 @@ public final class EngineActivity extends Activity {
             long startedAt = android.os.SystemClock.elapsedRealtime();
             long lastReport = startedAt;
             long lastStartupReport = startedAt;
+            boolean bootstrapReported = false;
             long lastProduced = nativeAudioProducedFrames() & 0xffffffffL;
             long lastWrittenFrames = 0;
             // A ten-second mean hides severe one-second audio starvation,
@@ -534,7 +536,8 @@ public final class EngineActivity extends Activity {
                 if (!audioStarted && available == 0 && now - lastStartupReport >= 5000) {
                     String startup = "AudioTrack waiting for native mixer: ringAvailable=0/" + capacity
                         + " producedFrames=" + (nativeAudioProducedFrames() & 0xffffffffL)
-                        + " queuedFrames=" + writtenFrames;
+                        + " queuedFrames=" + writtenFrames
+                        + " workletCallbacks=" + nativeAudioCallbackCount();
                     Log.w("NightlaneAudio", startup);
                     try { nativeAudioReport(startup); }
                     catch (Throwable ignored) {}
@@ -587,13 +590,24 @@ public final class EngineActivity extends Activity {
                     catch (InterruptedException stop) { return; }
                     continue;
                 }
-                if (priming && available == 0) {
-                    // Do not start AudioTrack on an entirely empty game ring.
-                    // The game can load a long cutscene before publishing the
-                    // first mixer block, and silence is preferable to static.
+                if (priming && NativeAudioBufferPolicy.waitForInitialSamples(
+                        available, capacity, now - startedAt)) {
+                    // Do not touch a ring that hasn't been published yet.
                     try { Thread.sleep(10); }
                     catch (InterruptedException stop) { return; }
                     continue;
+                }
+                if (priming && available == 0 && capacity > 0 && !bootstrapReported) {
+                    // A missing browser-style consumer callback may leave
+                    // the engine producer idle forever. Generate bounded
+                    // silence so PGFillAudio can advance callback accounting.
+                    bootstrapReported = true;
+                    String message = "AudioTrack starting empty-ring bootstrap after "
+                        + (now - startedAt) + "ms; workletCallbacks="
+                        + nativeAudioCallbackCount();
+                    Log.w("NightlaneAudio", message);
+                    try { nativeAudioReport(message); }
+                    catch (Throwable ignored) {}
                 }
                 // Avoid injecting 1024 zero frames whenever the producer only
                 // has a partial block. Consume valid samples, retain remaining
@@ -648,6 +662,7 @@ public final class EngineActivity extends Activity {
                     String report = "gameProducedFps=" + Math.round(newFrames / elapsed)
                         + " outputSubmittedFps=" + Math.round((writtenFrames - lastWrittenFrames) / elapsed)
                         + " ringAvailable=" + available + "/" + capacity
+                        + " workletCallbacks=" + nativeAudioCallbackCount()
                         + " outputQueued=" + queued + " peakQueue=" + peakQueue
                         + " AndroidUnderruns=" + track.getUnderrunCount()
                         + " shortWrites=" + shortWrites + " emptyReads=" + emptyReads
