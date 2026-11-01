@@ -71,6 +71,9 @@ public final class EngineActivity extends Activity {
     private InputManagerCompat devices;
     private AudioTrack audio;
     private Thread audioThread;
+    // Audio playback continues independently of the 60 Hz UI/input pump;
+    // game process startup may run well before the first onResume tick.
+    private volatile boolean audioThreadRunning, audioPaused;
     private volatile boolean running, muted, surfaceReady, engineCoreLoaded;
     private boolean focused, controller, inCar;
     private int frameLimit = 30;
@@ -168,9 +171,17 @@ public final class EngineActivity extends Activity {
 
         status = new TextView(this);
         status.setTextColor(0xffffffff); status.setBackgroundColor(0xb0000000);
-        status.setTextSize(16); status.setPadding(16, 8, 16, 8); status.setText(statusMessage);
-        root.addView(status, new FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, android.view.Gravity.CENTER));
+        status.setTextSize(12);
+        status.setMaxLines(3);
+        status.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        status.setPadding(12, 7, 12, 7);
+        status.setText(statusMessage);
+        FrameLayout.LayoutParams errorLocation = new FrameLayout.LayoutParams(
+            Math.min(dp(340), display[0] - dp(24)), ViewGroup.LayoutParams.WRAP_CONTENT,
+            android.view.Gravity.TOP | android.view.Gravity.LEFT);
+        errorLocation.leftMargin = dp(12);
+        errorLocation.topMargin = dp(48);
+        root.addView(status, errorLocation);
         status.setVisibility(View.GONE);
 
         fpsText = new TextView(this);
@@ -290,8 +301,8 @@ public final class EngineActivity extends Activity {
             // Users who prefer GTA's assisted lock-on can disable it in Settings.
             if (config.optBoolean("nightlane_touch_free_aim", true))
                 nativeSetTargetingMode(3);
-            if (!muted) startAudio();
             running = true;
+            if (!muted) startAudio();
             handler.post(tick);
         } catch (Throwable t) {
             setStatus("Startup failed: " + t);
@@ -417,40 +428,135 @@ public final class EngineActivity extends Activity {
     // directly here; setStatus marshals to the UI thread itself.
     public void setStatus(final String text) {
         statusMessage = text;
+        // Graphics-ring status messages are common tracing, not errors.
+        // Preserve them in the native log, but never cover gameplay with
+        // an oversized center-screen message.
+        final boolean serious = EngineStatusPolicy.showInGame(text);
         runOnUiThread(() -> {
             if (status == null) return;
-            status.setText(text);
-            boolean serious = text.startsWith("Startup failed") || text.startsWith("Graphics")
-                || text.startsWith("Game files missing") || text.startsWith("Native engine library failed")
-                || text.contains("no rendered frames");
-            status.setVisibility(serious ? View.VISIBLE : View.GONE);
+            if (serious) {
+                status.setText(text);
+                status.setVisibility(View.VISIBLE);
+            } else if (status.getVisibility() == View.VISIBLE) {
+                status.setVisibility(View.GONE);
+            }
         });
     }
 
     // --- audio ---------------------------------------------------------------
+    private int dp(int value) {
+        return (int) (value * getResources().getDisplayMetrics().density + 0.5f);
+    }
+
     private void startAudio() {
-        int rate = 48000, channelConfig = AudioFormat.CHANNEL_OUT_STEREO,
-            encoding = AudioFormat.ENCODING_PCM_16BIT;
-        int min = AudioTrack.getMinBufferSize(rate, channelConfig, encoding);
-        int bufferBytes = Math.max(min, 4096 * 4);
-        audio = new AudioTrack.Builder()
-            .setAudioAttributes(new AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_GAME).setContentType(AudioAttributes.CONTENT_TYPE_MOVIE).build())
-            .setAudioFormat(new AudioFormat.Builder()
-                .setEncoding(encoding).setSampleRate(rate).setChannelMask(channelConfig).build())
-            .setBufferSizeInBytes(bufferBytes).setTransferMode(AudioTrack.MODE_STREAM).build();
-        audio.play();
+        if (audioThreadRunning || audioThread != null) return;
+        final int rate = 48000;
+        final int channels = AudioFormat.CHANNEL_OUT_STEREO;
+        final int encoding = AudioFormat.ENCODING_PCM_16BIT;
+        final int min = AudioTrack.getMinBufferSize(rate, channels, encoding);
+        if (min <= 0) {
+            Log.e("NightlaneAudio", "AudioTrack rejected 48 kHz stereo PCM16, min=" + min);
+            return;
+        }
+        // 8192 frames = 171 ms output capacity. A slightly larger queue
+        // protects the Android mixer when Vulkan/wasm2c compilation stalls.
+        // The audio worker submits 1024 frames at a time to avoid bursts.
+        final int bufferBytes = Math.max(min, 8192 * 2 * 2);
+        try {
+            audio = new AudioTrack.Builder()
+                .setAudioAttributes(new AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_GAME)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_GAME).build())
+                .setAudioFormat(new AudioFormat.Builder()
+                    .setEncoding(encoding).setSampleRate(rate)
+                    .setChannelMask(channels).build())
+                .setBufferSizeInBytes(bufferBytes)
+                .setTransferMode(AudioTrack.MODE_STREAM).build();
+            if (audio.getState() != AudioTrack.STATE_INITIALIZED)
+                throw new IllegalStateException("AudioTrack failed to initialize");
+            audioPaused = false;
+            audioThreadRunning = true;
+            audio.play();
+        } catch (Throwable error) {
+            Log.e("NightlaneAudio", "Audio output initialization failed", error);
+            if (audio != null) { audio.release(); audio = null; }
+            audioThreadRunning = false;
+            return;
+        }
+        final AudioTrack track = audio;
         audioThread = new Thread(() -> {
-            short[] block = new short[4096];
-            while (running) {
-                int frames = 0;
-                try { frames = nativeAudio(block, block.length / 2); } catch (Exception ignored) {}
-                if (frames > 0) audio.write(block, 0, frames * 2);
-                else { try { Thread.sleep(8); } catch (InterruptedException e) { return; } }
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO);
+            final short[] block = new short[1024 * 2]; // 1024 stereo frames
+            long submitted = 0;
+            long shortWrites = 0;
+            long lastReport = android.os.SystemClock.elapsedRealtime();
+            while (audioThreadRunning && !Thread.currentThread().isInterrupted()) {
+                if (audioPaused) {
+                    try { Thread.sleep(10); }
+                    catch (InterruptedException stop) { return; }
+                    continue;
+                }
+                int frames;
+                try {
+                    frames = nativeAudio(block, block.length / 2);
+                } catch (Throwable error) {
+                    Log.e("NightlaneAudio", "Native audio pull failed", error);
+                    return;
+                }
+                if (frames <= 0) {
+                    try { Thread.sleep(5); }
+                    catch (InterruptedException stop) { return; }
+                    continue;
+                }
+                int remaining = Math.min(frames * 2, block.length);
+                int offset = 0;
+                while (offset < remaining && audioThreadRunning && !audioPaused) {
+                    int written = track.write(block, offset, remaining - offset,
+                        AudioTrack.WRITE_BLOCKING);
+                    if (written > 0) {
+                        offset += written;
+                        submitted += written / 2;
+                        if (written < remaining - offset) shortWrites++;
+                    } else if (written == 0) {
+                        shortWrites++;
+                        break;
+                    } else {
+                        Log.w("NightlaneAudio", "AudioTrack write returned " + written);
+                        audioThreadRunning = false;
+                        break;
+                    }
+                }
+                long now = android.os.SystemClock.elapsedRealtime();
+                if (now - lastReport >= 10000) {
+                    Log.i("NightlaneAudio", "submittedFrames=" + submitted
+                        + " shortWrites=" + shortWrites
+                        + " playbackHead=" + track.getPlaybackHeadPosition()
+                        + " bufferBytes=" + bufferBytes);
+                    lastReport = now;
+                    submitted = 0;
+                    shortWrites = 0;
+                }
             }
-        }, "engine-audio");
-        audioThread.setPriority(Thread.MAX_PRIORITY);
+        }, "nightlane-audio");
         audioThread.start();
+    }
+
+    private void stopAudio() {
+        audioThreadRunning = false;
+        if (audioThread != null) audioThread.interrupt();
+        if (audio != null) {
+            try { audio.pause(); audio.flush(); audio.stop(); }
+            catch (IllegalStateException ignored) {}
+        }
+        if (audioThread != null) {
+            try { audioThread.join(200); }
+            catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+            audioThread = null;
+        }
+        if (audio != null) {
+            audio.release();
+            audio = null;
+        }
     }
 
     // --- input ---------------------------------------------------------------
@@ -658,11 +764,18 @@ public final class EngineActivity extends Activity {
         super.onResume();
         if (!engineCoreLoaded) return;
         running = true; devices.start(); handler.post(tick);
+        if (audio != null && audioPaused) {
+            try { audio.play(); audioPaused = false; }
+            catch (IllegalStateException error) { Log.e("NightlaneAudio", "Resume playback failed", error); }
+        }
     }
     @Override protected void onPause() {
         running = false; handler.removeCallbacks(tick);
         if (engineCoreLoaded) { devices.stop(); clearInput(); }
-        if (audio != null) { try { audio.pause(); } catch (Exception ignored) {} }
+        audioPaused = true;
+        if (audio != null) {
+            try { audio.pause(); audio.flush(); } catch (IllegalStateException ignored) {}
+        }
         super.onPause();
     }
     @Override public void onWindowFocusChanged(boolean hasFocus) {
@@ -673,8 +786,7 @@ public final class EngineActivity extends Activity {
     @Override protected void onDestroy() {
         running = false;
         handler.removeCallbacksAndMessages(null);
-        if (audio != null) { try { audio.stop(); } catch (Exception ignored) {} }
-        if (audioThread != null) audioThread.interrupt();
+        stopAudio();
         super.onDestroy();
         // Native wasm2c memory and pthreads are process-owned, and the core
         // has no safe in-process reset. Isolate each new Play in a fresh
