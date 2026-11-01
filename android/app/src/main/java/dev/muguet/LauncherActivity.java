@@ -1507,7 +1507,7 @@ public final class LauncherActivity extends Activity {
             status.setText("Native startup failed: " + details);
             new AlertDialog.Builder(this)
                 .setTitle("Native engine startup failed")
-                .setMessage(details + "\\n\\nUse Export logs in Library to share diagnostics.")
+                .setMessage(details + "\n\nUse Export logs in Library to share diagnostics.")
                 .setPositiveButton("OK", null)
                 .show();
         } catch (Exception e) {

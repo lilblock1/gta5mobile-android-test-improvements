@@ -19,7 +19,9 @@ class NativeRendererOnlyTest(unittest.TestCase):
         self.assertIn('--no-default-features', gradle)
         self.assertIn('lib/arm64-v8a/libmuguet.so', wf)
         self.assertIn('lib/arm64-v8a/libgta5engine.so', wf)
-        self.assertIn('play.setOnClickListener(v -> launch(EngineActivity.class))', launcher)
+        self.assertIn('play.setOnClickListener(v -> playNative())', launcher)
+        self.assertIn('launch(EngineActivity.class);', launcher)
+        self.assertIn('private void playNative()', launcher)
         self.assertNotIn('android:name="dev.muguet.GameActivity"', (ROOT / "android/app/src/main/AndroidManifest.xml").read_text())
 if __name__ == "__main__":
     unittest.main()
