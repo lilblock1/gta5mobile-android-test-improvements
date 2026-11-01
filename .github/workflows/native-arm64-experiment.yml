@@ -4,7 +4,7 @@ name: Nightlane native ARM64 only (wasm2c + Vulkan renderer)
 # A successful APK build does not prove native gameplay.
 on:
   push:
-    branches: [experimental/native-arm64-dual-runtime, fix/native-futex-startup-diagnostics]
+    branches: [experimental/native-arm64-dual-runtime, fix/native-futex-startup-diagnostics, experimental/native-only-renderer]
   workflow_dispatch:
 
 permissions:
@@ -18,7 +18,7 @@ jobs:
   native-candidate:
     name: Compile native-only ARM64 APK (experimental)
     runs-on: ubuntu-24.04
-    timeout-minutes: 210
+    timeout-minutes: 295
     env:
       CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'
@@ -135,7 +135,7 @@ jobs:
           fi
 
       - name: Build native ARM64 core and Vulkan renderer without Wasmtime
-        timeout-minutes: 175
+        timeout-minutes: 235
         run: >-
           gradle -p android testDebugUnitTest assembleDebug
           -PwithEngineCore=true
@@ -143,9 +143,31 @@ jobs:
           "-PengineResourcesZip=$ENGINE_ZIP"
           --no-daemon --max-workers=2 --stacktrace
 
+      - name: Confirm optimized Clang options were used for native ARM64 game code
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, subprocess
+          ninja = list(pathlib.Path("android/app/.cxx").rglob("build.ninja"))
+          if not ninja:
+              raise SystemExit("Could not inspect actual Android NDK compile flags")
+          commands = subprocess.check_output(["ninja", "-C", str(ninja[0].parent), "-t", "commands"], text=True)
+          host = next((line for line in commands.splitlines() if "EngineBridge.c" in line), None)
+          generated = next((line for line in commands.splitlines()
+                            if re.search(r"game_[^/ ]+\\.c", line)), None)
+          if not host or not generated:
+              raise SystemExit("Missing native C compile commands")
+          def last_opt(line):
+              flags = re.findall(r"(?<!\\S)-O([0-3sgz]|fast)(?!\\S)", line)
+              return flags[-1] if flags else None
+          print("Handwritten host last -O:", last_opt(host),
+                "wasm2c generated game last -O:", last_opt(generated))
+          if last_opt(host) != "2" or last_opt(generated) != "1":
+              raise SystemExit("Compiled engine was not optimized as requested")
+          PY
+
       - name: Validate native engine and Vulkan renderer were actually packaged
         run: |
-          python3 tools/engine_resources.py verify-apk --apk android/app/build/outputs/apk/debug/app-debug.apk --resources "$ENGINE_ZIP"
+          python3 tools/engine_resources.py verify-apk --native-only --apk android/app/build/outputs/apk/debug/app-debug.apk --resources "$ENGINE_ZIP"
           python3 - <<'PY'
           import zipfile
           path = "android/app/build/outputs/apk/debug/app-debug.apk"
@@ -161,7 +183,7 @@ jobs:
       - name: Publish experimental native-only debug APK
         uses: actions/upload-artifact@v5
         with:
-          name: Nightlane-ARM64-NATIVE-ONLY-EXPERIMENTAL
+          name: Nightlane-ARM64-NATIVE-ONLY-OPTIMIZED-0.2.0
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 7
@@ -169,7 +191,7 @@ jobs:
       - name: Summary
         run: |
           echo '### Native ARM64 experiment' >> "$GITHUB_STEP_SUMMARY"
-          echo 'Native wasm2c core plus renderer-only Vulkan library; Wasmtime runtime excluded.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Optimized ARM64 wasm2c core, Vulkan renderer, native launcher settings, shaders-only assets; Wasmtime runtime excluded.' >> "$GITHUB_STEP_SUMMARY"
           echo 'Native wasm2c is NOT proven playable until device tests pass. Back up game saves first.' >> "$GITHUB_STEP_SUMMARY"
 
       # Save even after compilation/link failure: partial Clang object output

@@ -87,6 +87,7 @@ public final class EngineActivity extends Activity {
     private String statusMessage = "Starting engine…";
 
     private long lastMemoryWarningAt;
+    private long lastNativeMemorySampleAt;
     @Override public void onTrimMemory(int level) {
         super.onTrimMemory(level);
         if (level < android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) return;
@@ -559,6 +560,17 @@ public final class EngineActivity extends Activity {
         if (fpsAt != 0 && now - fpsAt < 1_000_000_000L) return;
         int thermalLevel = thermalStatus.level();
         nativeThermalLevel(thermalLevel);
+        // Sample Android process PSS once every 10 seconds, not every frame.
+        // Previous Wasmtime telemetry did this; native reports lacked it.
+        long uptime = android.os.SystemClock.elapsedRealtime();
+        if (uptime - lastNativeMemorySampleAt > 10000) {
+            lastNativeMemorySampleAt = uptime;
+            android.os.Debug.MemoryInfo m = new android.os.Debug.MemoryInfo();
+            android.os.Debug.getMemoryInfo(m);
+            Log.i("NightlaneEngine", "[native-telemetry] pss_mb=" + m.getTotalPss() / 1024
+                + " native_heap_mb=" + android.os.Debug.getNativeHeapAllocatedSize() / 1048576
+                + " thermal=" + thermalLevel + " fps=" + lastFps);
+        }
         long[] stats = nativePerfStats();
         if (stats == null || stats.length < PerformanceHud.STATS_COUNT) return;
         // The native game can park on a perfectly ordinary futex while another

@@ -1,155 +1,20 @@
-name: Nightlane native-only renderer and launcher test
+name: Nightlane archived fast repack (incompatible engine ABI)
 
-# Reuse the 500MB precompiled game engine. Rebuild only the tiny Rust Vulkan
-# renderer, resolving the previously missing android_main entry-point symbol.
-# Full native game builds remain available manually via the experiment workflow.
+# This older path reused the unoptimized 0.1.13 engine. Native 0.2.0 now
+# registers nativeConfigure() in libgta5engine.so. An older library would fail
+# RegisterNatives and make Play unusable. Keep this workflow as an explicit,
+# safe failure; use native-arm64-experiment.yml for an up-to-date native build.
 on:
-  push:
-    branches: [experimental/native-only-renderer]
   workflow_dispatch:
 
 permissions:
   contents: read
-  actions: read
-
-concurrency:
-  group: nightlane-native-fast-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
-  repack:
-    name: Reuse native ARM64 engine and rebuild Android launcher only
+  obsolete-fast-repack:
+    name: Retired — requires new native engine ABI
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    env:
-      ENGINE_ZIP: /tmp/nightlane-engine-resources.zip
     steps:
-      - uses: actions/checkout@v5
-
-      - name: Verify downloader and fast-repack policy
-        run: |
-          python3 -m unittest discover -s tools/tests -v
-          python3 tools/engine_resources.py prepare --output "$ENGINE_ZIP"
-
-      - name: Download pinned, successfully compiled native-only APK
-        uses: actions/download-artifact@v4
-        with:
-          name: Nightlane-ARM64-NATIVE-ONLY-EXPERIMENTAL
-          run-id: 41262147135
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: /tmp/nightlane-base-apk
-
-      - name: Verify and reuse unchanged native ARM64 libraries
-        run: |
-          python3 tools/reuse_native_libraries.py \
-            --source /tmp/nightlane-base-apk/app-debug.apk \
-            --destination android/app/src/main/jniLibs/arm64-v8a
-
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '17'
-      - name: Install Android SDK and NDK
-        run: |
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358'
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: native-arm64-candidate
-      - name: Install cargo-ndk (renderer only)
-        run: cargo install cargo-ndk --version 4.1.2 --locked
-      - name: Rebuild only Vulkan renderer and resolve Android glue symbol
-        env:
-          CARGO_BUILD_JOBS: '2'
-          CARGO_INCREMENTAL: '0'
-          CARGO_PROFILE_RELEASE_DEBUG: '0'
-        run: |
-          cargo ndk -t arm64-v8a --platform 29 -o android/app/src/main/jniLibs \
-            build --release --lib --no-default-features --features native-renderer
-          python3 - <<'PY'
-          import pathlib, re, subprocess, hashlib
-          lib = pathlib.Path("android/app/src/main/jniLibs/arm64-v8a/libmuguet.so")
-          symbols = subprocess.check_output(["readelf", "-W", "--dyn-syms", str(lib)], text=True)
-          matches = [line for line in symbols.splitlines() if line.rstrip().endswith("android_main")]
-          if not matches or any(" UND " in line for line in matches):
-              raise SystemExit(f"Renderer still has unresolved android_main: {matches}")
-          jni = "Java_dev_muguet_LauncherActivity_nativePrepare"
-          if jni not in symbols: raise SystemExit("Native launcher JNI exports are missing")
-          sha = hashlib.sha256(lib.read_bytes()).hexdigest()
-          pathlib.Path("/tmp/nightlane-renderer.sha256").write_text(sha)
-          print(f"[renderer] built and verified android_main + JNI exports; sha256 {sha}")
-          PY
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.13'
-
-      - name: Restore repeatable APK signing if configured
-        env:
-          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_B64 }}
-        run: |
-          if [ -n "$KEYSTORE" ]; then
-            printf '%s' "$KEYSTORE" | base64 -d > "$RUNNER_TEMP/native-keystore.jks"
-            echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/native-keystore.jks" >> "$GITHUB_ENV"
-          else
-            echo "::warning::No signing secret; a new debug signing key may prevent in-place updates. Back up saves."
-          fi
-
-      - name: Build Java UI and repackage prebuilt native libraries (no engine compile)
-        run: >-
-          gradle -p android testDebugUnitTest assembleDebug
-          -x :app:buildRust
-          "-PengineResourcesZip=$ENGINE_ZIP"
-          --no-daemon --max-workers=2 --stacktrace
-
-      - name: Verify game engine unchanged, renderer fixed and assets intact
-        run: |
-          python3 - <<'PY'
-          import hashlib, pathlib, subprocess, tempfile, zipfile
-          base = "/tmp/nightlane-base-apk/app-debug.apk"
-          rebuilt = "android/app/build/outputs/apk/debug/app-debug.apk"
-          game = "lib/arm64-v8a/libgta5engine.so"
-          renderer = "lib/arm64-v8a/libmuguet.so"
-          with zipfile.ZipFile(base) as old, zipfile.ZipFile(rebuilt) as new:
-              for name in (game, renderer):
-                  if old.namelist().count(name) != 1 or new.namelist().count(name) != 1:
-                      raise SystemExit(f"Native library missing/duplicated: {name}")
-              if hashlib.sha256(old.read(game)).digest() != hashlib.sha256(new.read(game)).digest():
-                  raise SystemExit("Precompiled native game engine was modified")
-              if hashlib.sha256(old.read(renderer)).digest() == hashlib.sha256(new.read(renderer)).digest():
-                  raise SystemExit("Unfixed native renderer was re-packaged")
-              # Gradle's stripDebugDebugSymbols step changes the renderer's byte
-              # hash, but must preserve the defined android_main and JNI symbols.
-              with tempfile.TemporaryDirectory() as tmp:
-                  lib = pathlib.Path(tmp) / "libmuguet.so"
-                  lib.write_bytes(new.read(renderer))
-                  symbols = subprocess.check_output(["readelf", "-W", "--dyn-syms", str(lib)], text=True)
-                  android = [line for line in symbols.splitlines() if line.rstrip().endswith("android_main")]
-                  if not android or any(" UND " in line for line in android):
-                      raise SystemExit(f"APK renderer has unresolved android_main: {android}")
-                  if "Java_dev_muguet_LauncherActivity_nativePrepare" not in symbols:
-                      raise SystemExit("APK renderer is missing launcher JNI exports")
-                  print("[native] APK android_main and launcher JNI are correctly exported")
-              print("[native] game engine unchanged; rebuilt Vulkan renderer packaged and verified")
-          PY
-          python3 tools/engine_resources.py verify-apk \
-            --apk android/app/build/outputs/apk/debug/app-debug.apk \
-            --resources "$ENGINE_ZIP"
-
-      - name: Publish native renderer linker fix APK
-        uses: actions/upload-artifact@v5
-        with:
-          name: Nightlane-ARM64-TOUCH-FPS-FIX-0.1.13
-          path: android/app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Summary
-        run: |
-          echo '### Launcher-only native APK repack' >> "$GITHUB_STEP_SUMMARY"
-          echo 'Reused game engine unchanged; touch-look JNI routed to active EngineActivity, renderer retained, internal Vulkan resolution scaled to 75%.' >> "$GITHUB_STEP_SUMMARY"
-          echo 'Experimental engine requires real-device testing.' >> "$GITHUB_STEP_SUMMARY"
+      - run: |
+          echo "::error::The old cached native engine cannot run the 0.2.0 launcher. Build native-arm64-experiment.yml instead."
+          exit 1

@@ -1232,7 +1232,12 @@ public final class LauncherActivity extends Activity {
             int found = 0;
             if (manager != null) {
                 for (ApplicationExitInfo info : manager.getHistoricalProcessExitReasons(getPackageName(), 0, 16)) {
-                    if (!(getPackageName() + ":game").equals(info.getProcessName())) continue;
+                    String process = info.getProcessName();
+                    // Include the current native :engine process as well as
+                    // the archived Wasmtime :game process.
+                    if (!(getPackageName() + ":game").equals(process)
+                            && !(getPackageName() + ":engine").equals(process)) continue;
+                    report.append("[android-exit] process=").append(process).append(' ');
                     report.append("[android-exit] timestamp_ms=").append(info.getTimestamp())
                         .append(" reason=").append(exitReason(info.getReason()))
                         .append(" status=").append(info.getStatus())

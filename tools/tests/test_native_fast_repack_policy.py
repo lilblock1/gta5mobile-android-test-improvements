@@ -26,14 +26,11 @@ class FastNativeRepackPolicy(unittest.TestCase):
                         launcher.index("column.addView(pauseDownload);"))
         self.assertNotIn('downloadGameButton.setEnabled(!ready && folder.isEmpty())', launcher)
 
-    def test_fast_workflow(self):
+    def test_legacy_fast_workflow_retired_after_native_abi_change(self):
         workflow = (ROOT / ".github/workflows/native-arm64-fast-repack.yml").read_text()
-        self.assertIn("-x :app:buildRust", workflow)
-        self.assertNotIn("-PwithEngineCore=true", workflow)
-        self.assertIn("tools/reuse_native_libraries.py", workflow)
-        self.assertIn("Nightlane-ARM64-TOUCH-FPS-FIX-0.1.13", workflow)
-        self.assertIn("cargo ndk -t arm64-v8a --platform 29", workflow)
-        self.assertIn("Precompiled native game engine was modified", workflow)
+        self.assertNotIn("branches: [experimental/native-only-renderer]", workflow)
+        self.assertIn("nativeConfigure()", workflow)
+        self.assertIn("exit 1", workflow)
         renderer = (ROOT / "src/renderer_only.rs").read_text()
         self.assertIn('pub extern "C" fn android_main(', renderer)
         self.assertIn('#[no_mangle]', renderer)
@@ -58,9 +55,13 @@ class FastNativeRepackPolicy(unittest.TestCase):
         self.assertIn('int width = renderWidth', engine)
         self.assertIn('int height = renderHeight', engine)
 
-    def test_full_compile_not_auto_triggered(self):
+    def test_full_optimized_native_compile_is_auto_triggered(self):
         native = (ROOT / ".github/workflows/native-arm64-experiment.yml").read_text()
-        self.assertNotIn("experimental/native-only-renderer", native.split("workflow_dispatch:", 1)[0])
+        self.assertIn("experimental/native-only-renderer", native.split("workflow_dispatch:", 1)[0])
+        self.assertIn("-PnativeRendererOnly=true", native)
+        self.assertIn("--native-only", native)
+        self.assertIn("Nightlane-ARM64-NATIVE-ONLY-OPTIMIZED-0.2.0", native)
+        self.assertIn("Confirm optimized Clang options were used", native)
 
 if __name__ == "__main__":
     unittest.main()
