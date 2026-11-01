@@ -165,6 +165,7 @@ public final class EngineActivity extends Activity {
         status.setTextSize(16); status.setPadding(16, 8, 16, 8); status.setText(statusMessage);
         root.addView(status, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, android.view.Gravity.CENTER));
+        status.setVisibility(View.GONE);
 
         fpsText = new TextView(this);
         fpsText.setTextColor(0xccffffff); fpsText.setTextSize(12);
@@ -395,7 +396,10 @@ public final class EngineActivity extends Activity {
         runOnUiThread(() -> {
             if (status == null) return;
             status.setText(text);
-            if (!text.isEmpty()) status.setVisibility(View.VISIBLE);
+            boolean serious = text.startsWith("Startup failed") || text.startsWith("Graphics")
+                || text.startsWith("Game files missing") || text.startsWith("Native engine library failed")
+                || text.contains("no rendered frames");
+            status.setVisibility(serious ? View.VISIBLE : View.GONE);
         });
     }
 
