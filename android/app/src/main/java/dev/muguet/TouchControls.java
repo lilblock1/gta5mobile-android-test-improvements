@@ -95,8 +95,8 @@ final class TouchControls extends View {
         // Keep the movement and driving controls in the bottom corners.
         // Both the hit target and the painted circle use the same scale.
         if (!inCar) add(left + (right - left) * 0.33f, bottom - 68*k, 36*k, "FIRE", "fire");
-        add(right - 62*k, bottom - 68*k, 40*k, inCar ? "GAS" : "FIRE", inCar ? "KeyW" : "fire");
-        add(right - 158*k, bottom - 46*k, 31*k, inCar ? "BRAKE" : "AIM", inCar ? "KeyS" : "aim");
+        add(right - 62*k, bottom - 68*k, 40*k, inCar ? "GAS" : "FIRE", inCar ? "gas" : "fire");
+        add(right - 158*k, bottom - 46*k, 31*k, inCar ? "BRAKE" : "AIM", inCar ? "brake" : "aim");
         add(right - 58*k, bottom - 168*k, 28*k, inCar ? "H.BRAKE" : "JUMP", "Space");
         add(right - 140*k, bottom - 132*k, 26*k, inCar ? "EXIT" : "ENTER", "KeyF");
         add(right - 222*k, bottom - 98*k, 24*k, inCar ? "HORN" : "RELOAD", inCar ? "horn" : "KeyR");
