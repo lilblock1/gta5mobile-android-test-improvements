@@ -545,6 +545,19 @@ public final class LauncherActivity extends Activity {
             new String[]{"Subtle — 16%", "Normal — 24%", "High contrast — 36%"},
             savedHudOpacity >= 0.30 ? 2 : savedHudOpacity >= 0.20 ? 1 : 0);
         mute = check(column, "Mute audio", settings.optBoolean("mute", false));
+        // This plays a short, quiet tone without launching GTA or reading any
+        // game mixer samples. It isolates device playback from the native port.
+        Button testSpeaker = new Button(this);
+        testSpeaker.setText("Test speaker (short tone)");
+        testSpeaker.setOnClickListener(v -> {
+            testSpeaker.setEnabled(false);
+            status.setText("Playing a short Android speaker test tone…");
+            AudioOutputProbe.test(result -> runOnUiThread(() -> {
+                status.setText(result);
+                testSpeaker.setEnabled(true);
+            }));
+        });
+        column.addView(testSpeaker);
         multiplayer = check(column, "Legacy multiplayer setting (native engine offline-only)", settings.optBoolean("multiplayer", false));
         // The relay is run by whoever hosts the session; you need its address, the
         // room name and the access code that host typed. Same rules as the web
