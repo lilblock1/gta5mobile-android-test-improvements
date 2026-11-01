@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 
 #define PG_HTTPFS_SLOT_BYTES 64
 #define PG_HTTPFS_MAX_SLOTS 4096
@@ -33,7 +34,12 @@
 typedef struct { char *path; uint64_t size; } PgAssetFile;
 // id 0xffffffff: the slot is free; fd -1: the file is not on this device.
 typedef struct { uint32_t id; int fd; } PgOpenFile;
-typedef struct { PgOpenFile files[PG_HTTPFS_OPEN_FILES]; uint32_t next; } PgFileCache;
+typedef struct {
+  PgOpenFile files[PG_HTTPFS_OPEN_FILES];
+  uint32_t next;
+  uint32_t lastReadId;
+  uint64_t lastReadEnd, hintedThrough;
+} PgFileCache;
 
 static PgAssetFile *pgAssets;
 static uint32_t pgAssetCount;
@@ -41,6 +47,40 @@ static char pgAssetRoot[PATH_MAX];
 static struct w2c_env *pgHttpFsHost;
 static uint64_t pgHttpFsTable;
 static _Atomic uint64_t pgHttpFsReads, pgHttpFsBytes, pgHttpFsMissing;
+static _Atomic uint64_t pgHttpFsOpenHits, pgHttpFsOpens, pgHttpFsErrors;
+static _Atomic uint64_t pgHttpFsSlowReads, pgHttpFsReadNs, pgHttpFsMaxReadNs;
+static _Atomic uint64_t pgHttpFsReadAheadHints, pgHttpFsLastLogNs;
+// 64 KiB sequential OS-cache hint, bounded and opt-out via environment.
+// This does not add a persistent application cache or change guest read bytes.
+static uint32_t pgHttpFsReadAheadKB = 64;
+
+static uint64_t pgHttpFsNow(void) {
+  struct timespec t = {0};
+  if (clock_gettime(CLOCK_MONOTONIC, &t) != 0) return 0;
+  return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+}
+
+static void pgHttpFsLogStats(void) {
+  uint64_t now = pgHttpFsNow(), last = atomic_load(&pgHttpFsLastLogNs);
+  if (!now || now - last < 10000000000ull
+      || !atomic_compare_exchange_strong(&pgHttpFsLastLogNs, &last, now)) return;
+  uint64_t reads = atomic_load(&pgHttpFsReads);
+  if (!reads) return;
+  char line[320];
+  snprintf(line, sizeof line,
+      "Native file server: %llu reads / %llu MiB, opens %llu hits %llu, errors %llu missing %llu, slow(>=15ms) %llu, max read %.1f ms, read time %.0f ms, sequential hints %llu (%u KiB)",
+      (unsigned long long)reads, (unsigned long long)(atomic_load(&pgHttpFsBytes) >> 20),
+      (unsigned long long)atomic_load(&pgHttpFsOpens),
+      (unsigned long long)atomic_load(&pgHttpFsOpenHits),
+      (unsigned long long)atomic_load(&pgHttpFsErrors),
+      (unsigned long long)atomic_load(&pgHttpFsMissing),
+      (unsigned long long)atomic_load(&pgHttpFsSlowReads),
+      atomic_load(&pgHttpFsMaxReadNs) / 1000000.0,
+      atomic_load(&pgHttpFsReadNs) / 1000000.0,
+      (unsigned long long)atomic_load(&pgHttpFsReadAheadHints), pgHttpFsReadAheadKB);
+  pg_log(line);
+}
+
 
 static const char *pgSkipSpace(const char *p) {
   while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
@@ -166,10 +206,14 @@ void pg_httpfs_configure(const char *manifestPath) {
 // reads do not reopen the same archive every time.
 static int pgOpenAsset(PgFileCache *cache, uint32_t id) {
   for (uint32_t i = 0; i < PG_HTTPFS_OPEN_FILES; i++)
-    if (cache->files[i].id == id) return cache->files[i].fd;
+    if (cache->files[i].id == id) {
+      atomic_fetch_add(&pgHttpFsOpenHits, 1);
+      return cache->files[i].fd;
+    }
   char path[PATH_MAX];
   snprintf(path, sizeof path, "%s/%s", pgAssetRoot, pgAssets[id].path);
   int fd = open(path, O_RDONLY | O_CLOEXEC);
+  if (fd >= 0) atomic_fetch_add(&pgHttpFsOpens, 1);
   if (fd < 0) {
     if (atomic_fetch_add(&pgHttpFsMissing, 1) < 8) {
       char line[PATH_MAX + 96];
@@ -197,15 +241,44 @@ static int64_t pgReadAsset(PgFileCache *cache, uint32_t id, uint64_t offset,
   uint8_t *target = (uint8_t *)(void *)memory->data + destination;
   int fd = pgOpenAsset(cache, id);
   if (fd < 0) return -1;
-  uint64_t done = 0;
+  uint64_t started = pgHttpFsNow(), done = 0;
   while (done < length) {
     ssize_t n = pread(fd, target + done, length - done, (off_t)(offset + done));
-    if (n < 0) { if (errno == EINTR) continue; return -1; }
+    if (n < 0) {
+      if (errno == EINTR) continue;
+      atomic_fetch_add(&pgHttpFsErrors, 1);
+      return -1;
+    }
     if (!n) break;
     done += (uint64_t)n;
   }
+  uint64_t elapsed = pgHttpFsNow() - started;
+  atomic_fetch_add(&pgHttpFsReadNs, elapsed);
+  if (elapsed >= 15000000ull) atomic_fetch_add(&pgHttpFsSlowReads, 1);
+  uint64_t maximum = atomic_load(&pgHttpFsMaxReadNs);
+  while (elapsed > maximum && !atomic_compare_exchange_weak(&pgHttpFsMaxReadNs, &maximum, elapsed)) {}
   atomic_fetch_add(&pgHttpFsReads, 1);
   atomic_fetch_add(&pgHttpFsBytes, done);
+
+  // Only consecutive accesses to the same file qualify for read-ahead.
+  // OS hints cannot modify game files; demand requests always complete first.
+  if (cache->lastReadId != id) cache->hintedThrough = 0;
+  uint64_t end = offset + done;
+  if (pgHttpFsReadAheadKB && done && cache->lastReadId == id
+      && offset == cache->lastReadEnd && end >= cache->hintedThrough
+      && end < entry->size) {
+    uint64_t ahead = entry->size - end;
+    uint64_t cap = (uint64_t)pgHttpFsReadAheadKB * 1024;
+    if (ahead > cap) ahead = cap;
+#if defined(POSIX_FADV_WILLNEED)
+    if (posix_fadvise(fd, (off_t)end, (off_t)ahead, POSIX_FADV_WILLNEED) == 0) {
+      cache->hintedThrough = end + ahead;
+      atomic_fetch_add(&pgHttpFsReadAheadHints, 1);
+    }
+#endif
+  }
+  cache->lastReadId = id;
+  cache->lastReadEnd = end;
   return (int64_t)done;
 }
 
@@ -215,6 +288,7 @@ static void *pgHttpFsWorker(void *unused) {
   PgFileCache cache;
   memset(&cache, 0, sizeof cache);
   for (uint32_t i = 0; i < PG_HTTPFS_OPEN_FILES; i++) { cache.files[i].id = 0xffffffffu; cache.files[i].fd = -1; }
+  cache.lastReadId = 0xffffffffu;
   for (;;) {
     if (pgHttpFsTable + PG_HTTPFS_SLOT_BYTES > memory->size) {
       pg_log("The engine's file request table is outside its memory.");
@@ -243,13 +317,7 @@ static void *pgHttpFsWorker(void *unused) {
       atomic_store(slot, 2);
       pg_atomic_notify(memory, address, UINT32_MAX);
     }
-    uint64_t reads = atomic_load(&pgHttpFsReads);
-    if (reads && reads % 20000 == 0) {
-      char line[160];
-      snprintf(line, sizeof line, "Native file server: %llu reads, %llu MB.",
-               (unsigned long long)reads, (unsigned long long)(atomic_load(&pgHttpFsBytes) >> 20));
-      pg_log(line);
-    }
+    pgHttpFsLogStats();
     pg_atomic_wait32(memory, pgHttpFsTable, (uint32_t)bell, 20000000);
   }
   return NULL;
@@ -264,8 +332,16 @@ void pg_httpfs_start(struct w2c_env *host, uint64_t table) {
     pg_log("The game file list is empty; the engine will not find its files.");
     return;
   }
+  const char *ahead = getenv("PG_HTTPFS_READAHEAD_KB");
+  if (ahead && *ahead) {
+    char *end = NULL;
+    long requested = strtol(ahead, &end, 10);
+    if (end != ahead && *end == 0 && requested >= 0 && requested <= 256)
+      pgHttpFsReadAheadKB = (uint32_t)requested;
+  }
   char line[160];
-  snprintf(line, sizeof line, "Native file server attached: %u game files on this device.", pgAssetCount);
+  snprintf(line, sizeof line, "Native file server attached: %u game files on this device; sequential read-ahead %u KiB (0 disables).",
+           pgAssetCount, pgHttpFsReadAheadKB);
   pg_log(line);
   for (int i = 0; i < PG_HTTPFS_WORKERS; i++) {
     pthread_attr_t attributes;
