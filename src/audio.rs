@@ -11,7 +11,7 @@ static CALLBACKS: AtomicU64 = AtomicU64::new(0);
 static STARTED: AtomicBool = AtomicBool::new(false);
 
 pub fn start(ring: u64, capacity: u32) {
-    if STARTED.swap(true, Ordering::SeqCst) || std::env::var("MUGUET_MUTE").is_ok() {
+    if std::env::var("MUGUET_MUTE").is_ok() || STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
 
@@ -45,14 +45,19 @@ fn play(ring: u64, capacity: u32) -> anyhow::Result<cpal::Stream> {
     let base = base as usize;
     let hdr = move |i: usize| -> &'static AtomicI32 { unsafe { &*((base + ring as usize + 4 * i) as *const AtomicI32) } };
     let data = base + ring as usize + 64;
-    let mask = capacity.wrapping_sub(1);
+    anyhow::ensure!(capacity > 0 && capacity.is_power_of_two(), "invalid audio ring capacity: {capacity}");
+    let mask = capacity - 1;
     let stream = device.build_output_stream(
         config,
         move |out: &mut [f32], _| {
             let frames = out.len() / 2;
             let read = hdr(1).load(Ordering::SeqCst) as u32;
             let write = hdr(0).load(Ordering::SeqCst) as u32;
-            let take = (write.wrapping_sub(read) as usize).min(frames);
+            // A producer reset or overrun must never make us read stale ring data.
+            let available = write.wrapping_sub(read);
+            let skipped = available.saturating_sub(capacity);
+            let read = read.wrapping_add(skipped);
+            let take = (available.min(capacity) as usize).min(frames);
             for i in 0..take {
                 let at = ((read.wrapping_add(i as u32) & mask) * 2) as usize;
                 unsafe {
@@ -62,7 +67,9 @@ fn play(ring: u64, capacity: u32) -> anyhow::Result<cpal::Stream> {
                 }
             }
             for s in &mut out[take * 2..] { *s = 0.0; }
-            UNDERRUN_FRAMES.fetch_add((frames - take) as u64, Ordering::Relaxed);
+            if take < frames {
+                UNDERRUN_FRAMES.fetch_add((frames - take) as u64, Ordering::Relaxed);
+            }
             CALLBACKS.fetch_add(1, Ordering::Relaxed);
             hdr(1).store(read.wrapping_add(take as u32) as i32, Ordering::SeqCst);
             hdr(3).fetch_add(1, Ordering::SeqCst);
