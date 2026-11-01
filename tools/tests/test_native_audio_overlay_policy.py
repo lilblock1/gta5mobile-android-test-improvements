@@ -48,10 +48,11 @@ class NativeAudioOverlayPolicy(unittest.TestCase):
         self.assertIn("AudioTrack.WRITE_BLOCKING", activity)
         self.assertIn("AudioAttributes.CONTENT_TYPE_MUSIC", activity)
         self.assertIn("8192 * 2 * 2", activity)
-        self.assertIn("short[1024 * 2]", activity)
+        self.assertIn("new short[NativeAudioBufferPolicy.BLOCK_FRAMES * 2]", activity)
         self.assertIn("THREAD_PRIORITY_AUDIO", activity)
         self.assertIn("if (audioPaused)", activity)
-        self.assertIn("try { audio.play(); audioPaused = false; }", activity)
+        self.assertIn("if (audioStarted)", activity)
+        self.assertIn("try { audio.play(); }", activity)
         self.assertIn("stopAudio();", activity)
         self.assertLess(activity.index("running = true;\n            if (!muted) startAudio();"),
                         activity.index("handler.post(tick);", activity.index("running = true;\n            if (!muted) startAudio();")))
