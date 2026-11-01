@@ -56,6 +56,23 @@ class NativePerformanceSafetyTest(unittest.TestCase):
         self.assertIn("pgHttpFsSlowReads", fs)
         self.assertIn("cache->files[i].id = 0xffffffffu;", fs)
 
+    def test_touch_aim_and_camera_can_move_together(self):
+        touch = source("android/app/src/main/java/dev/muguet/TouchControls.java")
+        activity = source("android/app/src/main/java/dev/muguet/EngineActivity.java")
+        bridge = source("vendor/fivestar/EngineBridge.c")
+        launcher = source("android/app/src/main/java/dev/muguet/LauncherActivity.java")
+        self.assertIn('grip.button == -1 || isAimDrag(grip)', touch)
+        self.assertIn('action.equals("aim") || action.equals("fire")', touch)
+        self.assertIn('boolean hasCameraFinger()', touch)
+        self.assertIn('if (aim && !inCar) input.buttons |= 2;', touch)
+        self.assertIn('now - lastTouchLookAt < 48_000_000L', activity)
+        self.assertIn('controls.hasCameraFinger()', activity)
+        self.assertIn('lookDX / 96.0f', bridge)
+        self.assertIn('pad.leftTrigger = 1.0f;', bridge)
+        self.assertIn('PGSetTargetingMode(mode);', bridge)
+        self.assertIn('nativeSetTargetingMode(3)', activity)
+        self.assertIn('"nightlane_touch_free_aim"', launcher)
+
     def test_no_fake_gpu_stall_shortcuts(self):
         gpu = source("src/gpu.rs")
         self.assertIn("PollType::Wait { submission_index: None, timeout: None }", gpu)
