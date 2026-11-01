@@ -389,22 +389,22 @@ static float curve_axis(float v) {
 }
 
 // keys: String[] of key names. touchButtons: muguet touch bits (1 fire, 2 aim).
-// horn: boolean. lookDX/lookDY: accumulated right-stick look delta in pixels
-// this frame (from TouchControls nativeLook), scaled into stick units.
+// horn: boolean. With useAnalogSticks=true, lookDX/lookDY are
+// normalized virtual right-stick axes (positive Y is screen-down).
+// The false case retains the historic pixel delta scale.
 static void nativeUpdatePad(JNIEnv *env, jobject thiz, jobjectArray keys,
                             jint touchButtons, jboolean horn, jfloat lookDX, jfloat lookDY,
                             jboolean useAnalogSticks) {
-  (void)thiz; (void)useAnalogSticks; // always analog; the flag is reserved for tuning
+  (void)thiz;
   PGPadState pad;
   memset(&pad, 0, sizeof pad);
 
-  // Right-stick input uses the Java touch displacement already scaled by
-  // sensitivity. The old /320 mapping made ordinary short drags disappear
-  // into the game's stick deadzone, especially while aiming down sights.
-  // 96 scaled pixels = full stick deflection; clamp before publishing.
+  // TouchControls already normalizes and applies sensitivity. Dividing
+  // by 96 again would make the analog input almost invisible to the game.
   if (isfinite(lookDX) && isfinite(lookDY)) {
-    pad.rightX = fmaxf(-1.0f, fminf(1.0f, lookDX / 96.0f));
-    pad.rightY = fmaxf(-1.0f, fminf(1.0f, -lookDY / 96.0f));
+    const float scale = useAnalogSticks ? 1.0f : (1.0f / 96.0f);
+    pad.rightX = fmaxf(-1.0f, fminf(1.0f, lookDX * scale));
+    pad.rightY = fmaxf(-1.0f, fminf(1.0f, -lookDY * scale));
   }
 
   // Walk the pressed key set once and set the corresponding pad bits / axes.
