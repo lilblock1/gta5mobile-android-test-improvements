@@ -212,7 +212,8 @@ static const char *const approvedRendererEnv[] = {
   "NIGHTLANE_FRAME_QUEUE", "NIGHTLANE_SHADOW_FIX", "NIGHTLANE_PRESENT",
   "NIGHTLANE_SHARPNESS", "NIGHTLANE_THERMAL_ADAPTIVE",
   "NIGHTLANE_PIPELINE_WORKERS", "MUGUET_GPU_SOFTWARE_CLIP", "MUGUET_GPU_CPU_BC", "MUGUET_RENDER_FPS_LIMIT",
-  "PG_HTTPFS_READAHEAD_KB", "NIGHTLANE_READBACK_REUSE"
+  "PG_HTTPFS_READAHEAD_KB", "NIGHTLANE_READBACK_REUSE",
+  "NIGHTLANE_PIPELINE_CACHE_DIR"
 };
 static void nativeConfigure(JNIEnv *env, jclass clazz, jobjectArray options,
                             jint workers, jfloat streamerBudget, jobjectArray rendererVars) {
