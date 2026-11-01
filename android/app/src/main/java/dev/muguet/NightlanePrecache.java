@@ -143,9 +143,11 @@ final class NightlanePrecache {
     private static ArrayList<Candidate> selectAssets(File gameRoot) throws IOException {
         ArrayList<Candidate> candidates = new ArrayList<>();
         File manifest = new File(gameRoot, "data/manifest.json");
-        // Local manifest paths are confined to gameRoot; never follow '../'
-        // from externally supplied manifests into private user files.
-        String base = gameRoot.getCanonicalPath() + File.separator;
+        // The native HTTPFS root is the manifest's parent (gameRoot/data),
+        // not gameRoot itself. Use precisely the same relative path layout.
+        // Canonical paths keep malformed manifests inside the chosen game data.
+        File dataRoot = manifest.getParentFile();
+        String base = dataRoot.getCanonicalPath() + File.separator;
         try (JsonReader json = new JsonReader(new BufferedReader(new FileReader(manifest)))) {
             json.beginObject();
             while (json.hasNext()) {
@@ -159,7 +161,7 @@ final class NightlanePrecache {
                     json.endArray();
                     int rank = priority(path);
                     if (rank == 0 || candidates.size() >= 512) continue;
-                    File file = new File(gameRoot, path);
+                    File file = new File(dataRoot, path);
                     if (!file.getCanonicalPath().startsWith(base) || !file.isFile()) continue;
                     long read = Math.min(file.length(), ASSET_PREFIX_BYTES);
                     if (read > 0) candidates.add(new Candidate(file, rank, read));
