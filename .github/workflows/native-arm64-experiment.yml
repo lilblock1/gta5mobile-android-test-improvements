@@ -1,10 +1,10 @@
-name: Nightlane native ARM64 (wasm2c experimental)
+name: Nightlane native ARM64 only (wasm2c + Vulkan renderer)
 
-# Separate from the working Wasmtime APK. Never make the native path the
-# default, and never publish a "working GTA V" claim from build success alone.
+# Builds an experimental native-only APK; old Wasmtime code is preserved in Git.
+# A successful APK build does not prove native gameplay.
 on:
   push:
-    branches: [experimental/native-arm64-dual-runtime, fix/native-futex-startup-diagnostics]
+    branches: [experimental/native-arm64-dual-runtime, fix/native-futex-startup-diagnostics, experimental/native-only-renderer]
   workflow_dispatch:
 
 permissions:
@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   native-candidate:
-    name: Compile dual-engine ARM64 APK (experimental)
+    name: Compile native-only ARM64 APK (experimental)
     runs-on: ubuntu-24.04
     timeout-minutes: 210
     env:
@@ -134,15 +134,16 @@ jobs:
             echo "::warning::No signing secret: Gradle uses a temporary debug certificate. Back up saves before replacing an installed test app."
           fi
 
-      - name: Build both Wasmtime and native ARM64 core into test APK
+      - name: Build native ARM64 core and Vulkan renderer without Wasmtime
         timeout-minutes: 175
         run: >-
           gradle -p android testDebugUnitTest assembleDebug
           -PwithEngineCore=true
+          -PnativeRendererOnly=true
           "-PengineResourcesZip=$ENGINE_ZIP"
           --no-daemon --max-workers=2 --stacktrace
 
-      - name: Validate that BOTH runtime libraries were actually packaged
+      - name: Validate native engine and Vulkan renderer were actually packaged
         run: |
           python3 tools/engine_resources.py verify-apk --apk android/app/build/outputs/apk/debug/app-debug.apk --resources "$ENGINE_ZIP"
           python3 - <<'PY'
@@ -154,13 +155,13 @@ jobs:
               missing = required - names
               if missing:
                   raise SystemExit(f"Native candidate APK incomplete: {sorted(missing)}")
-              print("[native-engine] Both Wasmtime and wasm2c ARM64 libraries are present")
+              print("[native-engine] wasm2c core and renderer-only Vulkan library are present")
           PY
 
-      - name: Publish experimental dual-engine debug APK
+      - name: Publish experimental native-only debug APK
         uses: actions/upload-artifact@v5
         with:
-          name: Nightlane-ARM64-Wasmtime-plus-wasm2c-EXPERIMENTAL
+          name: Nightlane-ARM64-NATIVE-ONLY-EXPERIMENTAL
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 7
@@ -168,7 +169,7 @@ jobs:
       - name: Summary
         run: |
           echo '### Native ARM64 experiment' >> "$GITHUB_STEP_SUMMARY"
-          echo 'Both execution backends are compiled into a **test** APK; Wasmtime remains default.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Native wasm2c core plus renderer-only Vulkan library; Wasmtime runtime excluded.' >> "$GITHUB_STEP_SUMMARY"
           echo 'Native wasm2c is NOT proven playable until device tests pass. Back up game saves first.' >> "$GITHUB_STEP_SUMMARY"
 
       # Save even after compilation/link failure: partial Clang object output

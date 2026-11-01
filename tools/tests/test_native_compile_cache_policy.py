@@ -58,8 +58,8 @@ class NativeCompileCachePolicyTest(unittest.TestCase):
         self.assertTrue(60 <= int(timeouts[0]) <= 180, "Compile timeout must leave time to persist ccache")
         self.assertIn("if: always() && steps.native_c_cache.outcome == 'success'", self.workflow)
         self.assertIn("Native compiler cache statistics", self.workflow)
-        self.assertIn("Publish experimental dual-engine debug APK", self.workflow)
-        self.assertIn("Validate that BOTH runtime libraries were actually packaged", self.workflow)
+        self.assertIn("Publish experimental native-only debug APK", self.workflow)
+        self.assertIn("Validate native engine and Vulkan renderer were actually packaged", self.workflow)
 
 
 if __name__ == "__main__":

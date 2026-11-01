@@ -277,7 +277,7 @@ public final class LauncherActivity extends Activity {
         subtitle.setTextColor(0xFF70D8FF);
         column.addView(subtitle);
         TextView warning = new TextView(this);
-        warning.setText("ARM64 / Android 10+ / Vulkan. A high-end phone with 8–12 GB RAM is recommended, not a guarantee of compatibility. Supply your own web-port data: import a ZIP, or point the app at a folder that already holds data/ and b/<build>/ with game.wasm and shaders inside. A normal PC installation is not enough. First launch compiles the game and may take several minutes.");
+        warning.setText("ARM64 / Android 10+ / Vulkan. A high-end phone with 8–12 GB RAM is recommended, not a guarantee of compatibility. Supply your own web-port data: import a ZIP, or point the app at a folder that already holds data/ and b/<build>/ with game.wasm and shaders inside. A normal PC installation is not enough. This test APK uses compiled native ARM64 game code; playability is not yet verified.");
         column.addView(warning);
         status = new TextView(this);
         column.addView(status);
@@ -556,8 +556,8 @@ public final class LauncherActivity extends Activity {
         sensitivityLabel.setText("Look sensitivity (touch drag): " + String.format(java.util.Locale.ROOT, "%.2fx", LookSensitivity.fromSlider(sensitivity.getProgress())));
         column.addView(sensitivity);
         play = new Button(this);
-        play.setText("Play (wasmtime engine)");
-        play.setOnClickListener(v -> launch(GameActivity.class));
+        play.setText("Play — native ARM64 (experimental)");
+        play.setOnClickListener(v -> launch(EngineActivity.class));
         pauseDownload = new Button(this);
         pauseDownload.setText("Pause download");
         pauseDownload.setVisibility(android.view.View.GONE);
@@ -577,11 +577,8 @@ public final class LauncherActivity extends Activity {
             .setPositiveButton("Start native test", (dialog, which) -> launch(EngineActivity.class))
             .show());
         column.addView(playEngine);
-        if (!engineLibraryPresent()) {
-            // This build ships only the wasmtime path. Offering the button would
-            // start an activity that dies with UnsatisfiedLinkError.
-            playEngine.setVisibility(android.view.View.GONE);
-        }
+        // Native-only APK: one Play button, no Wasmtime engine choice.
+        playEngine.setVisibility(android.view.View.GONE);
         // Bug reports go to the project issue tracker; the social link reaches the
         // author directly. Both open in the browser, never inside the app.
         TextView support = new TextView(this);
@@ -765,7 +762,7 @@ public final class LauncherActivity extends Activity {
             // settings. Record the chosen runtime for future log comparisons;
             // this is metadata, not an instruction to auto-switch backends.
             boolean nativeBackend = activity == EngineActivity.class;
-            settings.put("nightlane_execution_backend", nativeBackend ? "native_wasm2c" : "wasmtime");
+            settings.put("nightlane_execution_backend", "native_wasm2c");
             saveSettings();
             if (!nativePrepare(getFilesDir().getAbsolutePath())) {
                 String selectedFolder = folderPath();
@@ -871,7 +868,7 @@ public final class LauncherActivity extends Activity {
             boolean canPlay = ready || folder.isEmpty();
             play.setEnabled(canPlay);
             playEngine.setEnabled(ready);
-            play.setText(ready ? "Play (wasmtime engine)" : "Play — download game data");
+            play.setText(ready ? "Play — native ARM64 (experimental)" : "Play — download game data");
             status.setText(ready ? "Game data ready." : "Tap Play to download game data, or import your existing files. Keep the app open during setup.");
         } catch (Exception e) { play.setEnabled(false); playEngine.setEnabled(false); error(e); }
     }

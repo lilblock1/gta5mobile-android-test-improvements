@@ -1,6 +1,7 @@
 // muguet - gpu.rs
 // Constantin Clerc (c22dev) - 0.1
 
+#[cfg(not(feature = "native-renderer"))]
 use crate::mem_base_len;
 use regex::Regex;
 use std::cell::RefCell;
@@ -10,6 +11,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
+#[cfg(not(feature = "native-renderer"))]
 use wasmtime::SharedMemory;
 use wgpu::*;
 
@@ -76,10 +78,12 @@ pub trait RingMem: Send + Sync {
     fn notify(&self, addr: u64) -> u32;
 }
 
+#[cfg(not(feature = "native-renderer"))]
 struct WasmMem {
     mem: SharedMemory,
 }
 
+#[cfg(not(feature = "native-renderer"))]
 impl RingMem for WasmMem {
     fn base(&self) -> *mut u8 {
         mem_base_len(&self.mem).0
@@ -242,6 +246,7 @@ pub fn release_android_surface() {
     if rx.recv().is_err() { log("GPU surface release failed"); }
 }
 
+#[cfg(not(feature = "native-renderer"))]
 pub fn start(mem: &SharedMemory, ring: u64, size: u64, dbg: u64) {
     start_with(Arc::new(WasmMem { mem: mem.clone() }), ring, size, dbg);
 }
@@ -4305,7 +4310,7 @@ impl Gpu {
             let frames = self.presents - self.fps_n0;
             log(&format!(
                 "fps: {:.1} ({} MB memory, game heap {} MB, {} frames, {} clears folded, {} draws/frame, {} draws waiting for a compiling pipeline, {:.1} submits/frame, {:.1} passes/frame, {} skipped total, pipelines {}, bind groups cached {}, validation errors {})",
-                frames as f64 / dt, crate::footprint_mb(), crate::RT.get().map(|r| r.mem.data_size() >> 20).unwrap_or(0), frames, self.clears_folded, (self.draws - self.fps_d0) / frames.max(1), self.pending_skips - self.pending_skips0, (self.submits - self.submits0) as f64 / frames.max(1) as f64,
+                frames as f64 / dt, crate::footprint_mb(), crate::runtime_memory_mb(), frames, self.clears_folded, (self.draws - self.fps_d0) / frames.max(1), self.pending_skips - self.pending_skips0, (self.submits - self.submits0) as f64 / frames.max(1) as f64,
                 (self.passes - self.passes0) as f64 / frames.max(1) as f64, self.skipped, self.pipe_creates, self.bind_groups.len(), self.errors.load(Ordering::Relaxed)
             ));
             if let Some(r) = self.instance.generate_report() {

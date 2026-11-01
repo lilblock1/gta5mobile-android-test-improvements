@@ -98,6 +98,10 @@ tasks.register('buildRust', Exec) {
     // Native linking targets minSdk, not compileSdk/targetSdk. NDK r28 supports up to API 35.
     commandLine 'cargo', 'ndk', '-t', 'arm64-v8a', '--platform', nativeApi.toString(),
         '-o', 'android/app/src/main/jniLibs', 'build', '--release', '--lib'
+    // Compile only the renderer and launcher JNI, not the Wasmtime runtime.
+    if (project.hasProperty('nativeRendererOnly') && project.property('nativeRendererOnly').toString().toBoolean()) {
+        args '--no-default-features', '--features', 'native-renderer'
+    }
     doFirst {
         def platformsFile = new File(ndkDir, 'meta/platforms.json')
         if (!platformsFile.isFile()) {
@@ -108,6 +112,7 @@ tasks.register('buildRust', Exec) {
             throw new GradleException("Native API ${nativeApi} is outside NDK ${android.ndkVersion}'s supported range ${platforms.min}-${platforms.max}.")
         }
     }
+    inputs.property('nativeRendererOnly', project.findProperty('nativeRendererOnly') ?: 'false')
     inputs.property('nativeApi', nativeApi)
     inputs.property('ndkVersion', android.ndkVersion)
     inputs.files(fileTree('../../src'), file('../../Cargo.toml'), file('../../Cargo.lock'), file('../../build.rs'), fileTree('../../vendor'))

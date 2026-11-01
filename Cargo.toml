@@ -8,10 +8,11 @@ edition = "2021"
 license = "GPL-3.0-or-later"
 
 [lib]
+path = "src/lib_router.rs"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
-wasmtime = { version = "49", default-features = false, features = ["runtime", "threads", "profiling", "anyhow"] }
+wasmtime = { version = "49", optional = true, default-features = false, features = ["runtime", "threads", "profiling", "anyhow"] }
 anyhow = "1"
 serde_json = "1.0.151"
 wgpu = "30.0.1"
@@ -44,7 +45,9 @@ jni = "0.21"
 
 [features]
 default = ["jit"]
-jit = ["wasmtime/cranelift", "wasmtime/parallel-compilation", "dep:wasmparser", "dep:wasm-encoder"]
+# Compile the Vulkan renderer and launcher helpers without the Wasmtime runtime.
+native-renderer = []
+jit = ["dep:wasmtime", "wasmtime/cranelift", "wasmtime/parallel-compilation", "dep:wasmparser", "dep:wasm-encoder"]
 
 [profile.release]
 opt-level = 2

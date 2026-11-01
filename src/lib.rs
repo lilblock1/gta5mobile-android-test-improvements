@@ -60,6 +60,10 @@ pub struct HostState {
 
 pub static RT: OnceLock<Arc<Runtime>> = OnceLock::new();
 
+pub fn runtime_memory_mb() -> u64 {
+    RT.get().map(|r| (r.mem.data_size() >> 20) as u64).unwrap_or(0)
+}
+
 pub fn footprint_mb() -> u64 {
     #[cfg(not(target_vendor = "apple"))]
     {
