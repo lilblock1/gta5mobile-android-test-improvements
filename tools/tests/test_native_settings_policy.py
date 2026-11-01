@@ -17,7 +17,7 @@ class NativeSettingsPolicy(unittest.TestCase):
         self.assertIn("native_cpu_workers", self.launcher)
         self.assertIn("nativeTargetFps(config)", self.engine)
     def test_engine_fps_is_not_passed_as_raw_mode(self):
-        self.assertIn("const int nativeFrameMode = frameLimit <= 0 ? 0 : frameLimit <= 30 ? 2 : 1", self.bridge)
+        self.assertIn("const int nativeFrameMode = frameLimit <= 0 ? 0 : frameLimit == 30 ? 2 : 1", self.bridge)
         self.assertIn("PGConfigureEngine(qualityPointers, qualityCount", self.bridge)
         self.assertIn("MUGUET_RENDER_FPS_LIMIT", self.engine)
         self.assertNotIn("PGConfigureEngine(quality, 0, width, height, frameLimit)", self.bridge)
