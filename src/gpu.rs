@@ -1326,6 +1326,12 @@ pub struct Gpu {
     frame_waits: u64,
     frame_wait_ns: u64,
     frame_wait_max_ns: u64,
+    // Distinguish deliberate host frame sleeps from GPU fence/device stalls.
+    // A redundant 30 Hz sleep can make a cutscene stutter even when GPU work
+    // itself is fast; report how often/long it actually slept.
+    host_pace_sleeps: u64,
+    host_pace_sleep_ns: u64,
+    host_pace_max_ns: u64,
     explicit_fence_waits: u64,
     explicit_fence_ns: u64,
     explicit_fence_max_ns: u64,
@@ -1588,6 +1594,7 @@ impl Gpu {
             draws: 0, skipped: 0, presents: 0, pipe_creates: 0, fps_t0: Instant::now(), fps_n0: 0, fps_d0: 0,
             frame_last_at: None, frame_gaps_ms: VecDeque::with_capacity(600),
             frame_waits: 0, frame_wait_ns: 0, frame_wait_max_ns: 0,
+            host_pace_sleeps: 0, host_pace_sleep_ns: 0, host_pace_max_ns: 0,
             explicit_fence_waits: 0, explicit_fence_ns: 0, explicit_fence_max_ns: 0,
             errors, lost, inflight: Arc::new(AtomicU64::new(0)), submits: 0, submits0: 0, passes: 0, passes0: 0,
         })
@@ -4446,6 +4453,10 @@ impl Gpu {
         let deadline = self.frame_due.unwrap_or(now);
         if deadline > now {
             std::thread::sleep(deadline - now);
+            let slept = now.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+            self.host_pace_sleeps += 1;
+            self.host_pace_sleep_ns = self.host_pace_sleep_ns.saturating_add(slept);
+            self.host_pace_max_ns = self.host_pace_max_ns.max(slept);
         }
         let actual = Instant::now();
         let next = deadline.checked_add(period).unwrap_or(actual + period);
@@ -4646,6 +4657,16 @@ impl Gpu {
                 self.frame_wait_max_ns as f64 / 1e6,
                 self.pipelines.len(), PIPELINE_LIMIT, self.pipe_pending.len(), self.pipeline_evictions,
             ));
+            log(&format!(
+                "renderer pacing: host sleep calls {} avg {:.3} ms max {:.3} ms total {:.1} ms (thermal caps can activate even when launcher uses guest 30 FPS)",
+                self.host_pace_sleeps,
+                if self.host_pace_sleeps == 0 { 0.0 } else { self.host_pace_sleep_ns as f64 / self.host_pace_sleeps as f64 / 1e6 },
+                self.host_pace_max_ns as f64 / 1e6,
+                self.host_pace_sleep_ns as f64 / 1e6,
+            ));
+            self.host_pace_sleeps = 0;
+            self.host_pace_sleep_ns = 0;
+            self.host_pace_max_ns = 0;
             log(&format!(
                 "gpu fences: {} explicit waits, {:.3} ms average, {:.3} ms max, {:.3} ms total",
                 self.explicit_fence_waits,
