@@ -85,6 +85,26 @@ mod launcher_jni {
         match result { Ok(true) => JNI_TRUE, Ok(false) => JNI_FALSE,
             Err(e) => { throw(&mut env, e); JNI_FALSE } }
     }
+    // Shader warm-up on the launcher worker. Parsing WGSL ahead of startup
+    // catches invalid source and populates the Android filesystem page cache,
+    // but does not pretend to compile unknown GTA render-state combinations.
+    // The renderer's persisted Vulkan PipelineCache handles compiled variants.
+    #[no_mangle]
+    pub extern "system" fn Java_dev_muguet_LauncherActivity_nativeShaderValidate(
+        mut env: JNIEnv, _class: JClass, source: JString,
+    ) -> jboolean {
+        let Ok(path) = env.get_string(&source).map(|v| v.to_string_lossy().into_owned()) else {
+            return JNI_FALSE;
+        };
+        let file = Path::new(&path);
+        let Ok(metadata) = std::fs::metadata(file) else { return JNI_FALSE };
+        if !metadata.is_file() || metadata.len() == 0 || metadata.len() > 2 * 1024 * 1024 {
+            return JNI_FALSE;
+        }
+        let Ok(text) = std::fs::read_to_string(file) else { return JNI_FALSE };
+        if wgpu::naga::front::wgsl::parse_str(&text).is_ok() { JNI_TRUE } else { JNI_FALSE }
+    }
+
     #[no_mangle]
     pub extern "system" fn Java_dev_muguet_LauncherActivity_nativeGameRoot(
         mut env: JNIEnv, _activity: JObject, dir: JString,
