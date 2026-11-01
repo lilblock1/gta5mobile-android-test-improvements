@@ -272,10 +272,16 @@ public final class EngineActivity extends Activity {
                 + " instead of full display resolution to reduce GPU load");
             // The old Wasmtime startup used to apply these arguments in Rust.
             // Native-only launches must explicitly forward them over JNI.
+            java.util.ArrayList<String> nativeOptions = new java.util.ArrayList<>(
+                java.util.Arrays.asList(nativeRendererOptions(config, frameLimit)));
+            // App-private cache; native GPU thread persists driver-built pipeline
+            // binaries here for reuse on the next launch, if the driver supports it.
+            nativeOptions.add("NIGHTLANE_PIPELINE_CACHE_DIR=" +
+                new File(getFilesDir(), "nightlane-gpu-cache").getAbsolutePath());
             nativeConfigure(nativeGraphicsArgs(config),
                 Math.max(1, Math.min(8, config.optInt("native_cpu_workers", 2))),
                 (float) config.optDouble("streamer_percentage", 0.35),
-                nativeRendererOptions(config, frameLimit));
+                nativeOptions.toArray(new String[0]));
             Log.i("NightlaneEngine", "Native graphics preferences applied; requested FPS " + frameLimit);
             nativeStartUptimeMs = android.os.SystemClock.elapsedRealtime();
             nativeStart(gameDir.getAbsolutePath(), manifest.getAbsolutePath(), startMode,
