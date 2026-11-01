@@ -555,10 +555,10 @@ public final class LauncherActivity extends Activity {
         relayKey = field(column, "Access code (from the host)", settings.optString("relay_key", ""));
         name = field(column, "Player name", settings.optString("player_name", ""));
         sensitivityLabel = new TextView(this);
-        sensitivityLabel.setText("Look sensitivity (touch drag)");
+        sensitivityLabel.setText("Look sensitivity (touch drag, up to 12x)");
         column.addView(sensitivityLabel);
         sensitivity = new SeekBar(this);
-        sensitivity.setMax(15);
+        sensitivity.setMax(LookSensitivity.MAX_PROGRESS);
         int savedLook = LookSensitivity.toSlider((float) settings.optDouble("touch_sensitivity", 1.0));
         sensitivity.setProgress(savedLook);
         sensitivity.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {

@@ -160,13 +160,15 @@ public final class EngineActivity extends Activity {
         root.addView(surface, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
+        float touchGain = LookSensitivity.fromConfig(new File(getFilesDir(), "config.json"));
+        Log.i("NightlaneInput", "Native touch look sensitivity: " + touchGain + "x");
         controls = new TouchControls(this,
-            LookSensitivity.fromConfig(new File(getFilesDir(), "config.json")),
+            touchGain,
             (dx, dy) -> {
                 // Native-only touch look is delivered by nativeUpdatePad, never
                 // GameActivity.nativeLook (old Wasmtime JNI).
-                accLookX = Math.max(-360f, Math.min(360f, accLookX + dx));
-                accLookY = Math.max(-360f, Math.min(360f, accLookY + dy));
+                accLookX = Math.max(-1440f, Math.min(1440f, accLookX + dx));
+                accLookY = Math.max(-1440f, Math.min(1440f, accLookY + dy));
             });
         controls.setVisibility(View.VISIBLE);
         root.addView(controls, new FrameLayout.LayoutParams(
@@ -261,6 +263,7 @@ public final class EngineActivity extends Activity {
             nativeSetLogPath(new File(getFilesDir(), "nightlane-native.log").getAbsolutePath());
             JSONObject config = readConfig();
             muted = config.optBoolean("mute", false);
+            Log.i("NightlaneAudio", "Launch audio mute=" + muted + " (native wasm2c)");
             frameLimit = nativeTargetFps(config);
             int startMode = config.optInt("start_mode", 2);
             // EngineHost reads PG_ENGINE_HEAP_MB before boot; set it from the
@@ -306,6 +309,7 @@ public final class EngineActivity extends Activity {
                 nativeSetTargetingMode(3);
             running = true;
             if (!muted) startAudio();
+            else Log.w("NightlaneAudio", "Audio disabled by saved Mute setting");
             handler.post(tick);
         } catch (Throwable t) {
             setStatus("Startup failed: " + t);
@@ -499,6 +503,7 @@ public final class EngineActivity extends Activity {
             long shortWrites = 0, emptyReads = 0, waitingCycles = 0;
             long startedAt = android.os.SystemClock.elapsedRealtime();
             long lastReport = startedAt;
+            long lastStartupReport = startedAt;
             long lastProduced = nativeAudioProducedFrames() & 0xffffffffL;
             long lastWrittenFrames = 0;
             // A ten-second mean hides severe one-second audio starvation,
@@ -524,6 +529,17 @@ public final class EngineActivity extends Activity {
                 }
                 int available = NativeAudioBufferPolicy.boundedAvailable(state);
                 int capacity = NativeAudioBufferPolicy.ringCapacity(state);
+                // Priming previously had no telemetry when the mixer never
+                // produced a frame; record this condition in the exported log.
+                if (!audioStarted && available == 0 && now - lastStartupReport >= 5000) {
+                    String startup = "AudioTrack waiting for native mixer: ringAvailable=0/" + capacity
+                        + " producedFrames=" + (nativeAudioProducedFrames() & 0xffffffffL)
+                        + " queuedFrames=" + writtenFrames;
+                    Log.w("NightlaneAudio", startup);
+                    try { nativeAudioReport(startup); }
+                    catch (Throwable ignored) {}
+                    lastStartupReport = now;
+                }
                 if (now - oneSecondAt >= 1000) {
                     long producedAt = nativeAudioProducedFrames() & 0xffffffffL;
                     long newFrames = (producedAt - oneSecondProduced) & 0xffffffffL;
@@ -568,14 +584,6 @@ public final class EngineActivity extends Activity {
                                    : queued >= NativeAudioBufferPolicy.MIN_QUEUED_FRAMES)) {
                     waitingCycles++;
                     try { Thread.sleep(4); }
-                    catch (InterruptedException stop) { return; }
-                    continue;
-                }
-                if (NativeAudioBufferPolicy.waitForBriefRefill(available, queued, priming)) {
-                    // The device still has audible samples queued: avoid
-                    // replacing a short producer scheduling gap with silence.
-                    waitingCycles++;
-                    try { Thread.sleep(2); }
                     catch (InterruptedException stop) { return; }
                     continue;
                 }
