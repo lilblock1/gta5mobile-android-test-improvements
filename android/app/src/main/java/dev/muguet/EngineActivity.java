@@ -57,6 +57,8 @@ public final class EngineActivity extends Activity {
                                                      float lt, float rt, int buttons);
     private static native void nativeSetTargetingMode(int mode);
     private static native int nativeAudio(short[] out, int maxFrames);
+    private static native long nativeAudioBufferState();
+    private static native long nativeAudioProducedFrames();
     private static native boolean nativePauseMenuActive();
     private static native int nativeLastInputDevice();
     private static native int nativeTouchContext();
@@ -73,7 +75,7 @@ public final class EngineActivity extends Activity {
     private Thread audioThread;
     // Audio playback continues independently of the 60 Hz UI/input pump;
     // game process startup may run well before the first onResume tick.
-    private volatile boolean audioThreadRunning, audioPaused;
+    private volatile boolean audioThreadRunning, audioPaused, audioStarted;
     private volatile boolean running, muted, surfaceReady, engineCoreLoaded;
     private boolean focused, controller, inCar;
     private int frameLimit = 30;
@@ -475,8 +477,8 @@ public final class EngineActivity extends Activity {
             if (audio.getState() != AudioTrack.STATE_INITIALIZED)
                 throw new IllegalStateException("AudioTrack failed to initialize");
             audioPaused = false;
+            audioStarted = false;
             audioThreadRunning = true;
-            audio.play();
         } catch (Throwable error) {
             Log.e("NightlaneAudio", "Audio output initialization failed", error);
             if (audio != null) { audio.release(); audio = null; }
@@ -486,56 +488,130 @@ public final class EngineActivity extends Activity {
         final AudioTrack track = audio;
         audioThread = new Thread(() -> {
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO);
-            final short[] block = new short[1024 * 2]; // 1024 stereo frames
-            long submitted = 0;
-            long shortWrites = 0;
-            long lastReport = android.os.SystemClock.elapsedRealtime();
+            final short[] block = new short[NativeAudioBufferPolicy.BLOCK_FRAMES * 2];
+            long writtenFrames = 0;
+            long lastHead32 = 0, headWraps = 0;
+            long shortWrites = 0, emptyReads = 0, waitingCycles = 0;
+            long startedAt = android.os.SystemClock.elapsedRealtime();
+            long lastReport = startedAt;
+            long lastProduced = nativeAudioProducedFrames() & 0xffffffffL;
+            long peakQueue = 0;
             while (audioThreadRunning && !Thread.currentThread().isInterrupted()) {
                 if (audioPaused) {
-                    try { Thread.sleep(10); }
+                    try { Thread.sleep(8); }
                     catch (InterruptedException stop) { return; }
                     continue;
                 }
-                int frames;
-                try {
-                    frames = nativeAudio(block, block.length / 2);
-                } catch (Throwable error) {
-                    Log.e("NightlaneAudio", "Native audio pull failed", error);
+                long now = android.os.SystemClock.elapsedRealtime();
+                long state;
+                try { state = nativeAudioBufferState(); }
+                catch (Throwable failure) {
+                    Log.e("NightlaneAudio", "Native mixer fill query failed", failure);
                     return;
                 }
-                if (frames <= 0) {
+                int available = NativeAudioBufferPolicy.boundedAvailable(state);
+                int capacity = NativeAudioBufferPolicy.ringCapacity(state);
+                boolean priming = !audioStarted;
+                long played = 0;
+                if (!priming) {
+                    long head32 = track.getPlaybackHeadPosition() & 0xffffffffL;
+                    if (head32 < lastHead32 && lastHead32 - head32 > (1L << 31))
+                        headWraps += (1L << 32);
+                    lastHead32 = head32;
+                    played = headWraps + head32;
+                }
+                long queued = NativeAudioBufferPolicy.queueDepth(writtenFrames, played);
+                peakQueue = Math.max(peakQueue, queued);
+                if (priming && now - startedAt < NativeAudioBufferPolicy.MAX_STARTUP_WAIT_MS
+                        && available < NativeAudioBufferPolicy.startupWatermark(capacity)) {
+                    waitingCycles++;
                     try { Thread.sleep(5); }
                     catch (InterruptedException stop) { return; }
                     continue;
                 }
-                int remaining = Math.min(frames * 2, block.length);
+                if (!priming && queued >= NativeAudioBufferPolicy.TARGET_QUEUED_FRAMES) {
+                    try { Thread.sleep(4); }
+                    catch (InterruptedException stop) { return; }
+                    continue;
+                }
+                if (NativeAudioBufferPolicy.waitForProducer(available, queued, priming)
+                        && (priming ? now - startedAt < NativeAudioBufferPolicy.MAX_STARTUP_WAIT_MS
+                                   : queued >= NativeAudioBufferPolicy.MIN_QUEUED_FRAMES)) {
+                    waitingCycles++;
+                    try { Thread.sleep(4); }
+                    catch (InterruptedException stop) { return; }
+                    continue;
+                }
+                if (priming && available == 0) {
+                    // Do not start AudioTrack on an entirely empty game ring.
+                    // The game can load a long cutscene before publishing the
+                    // first mixer block, and silence is preferable to static.
+                    try { Thread.sleep(10); }
+                    catch (InterruptedException stop) { return; }
+                    continue;
+                }
+                // Avoid injecting 1024 zero frames whenever the producer only
+                // has a partial block. Consume valid samples, retain remaining
+                // output latency and let the producer catch up.
+                int request = available > 0 ? Math.min(NativeAudioBufferPolicy.BLOCK_FRAMES, available)
+                    : Math.min(256, NativeAudioBufferPolicy.BLOCK_FRAMES);
+                int frames;
+                try { frames = nativeAudio(block, request); }
+                catch (Throwable failure) {
+                    Log.e("NightlaneAudio", "Native audio pull failed", failure);
+                    return;
+                }
+                if (frames <= 0) {
+                    emptyReads++;
+                    try { Thread.sleep(5); }
+                    catch (InterruptedException stop) { return; }
+                    continue;
+                }
+                int requestedSamples = Math.min(frames * 2, block.length);
                 int offset = 0;
-                while (offset < remaining && audioThreadRunning && !audioPaused) {
-                    int requested = remaining - offset;
-                    int written = track.write(block, offset, requested,
-                        AudioTrack.WRITE_BLOCKING);
-                    if (written > 0) {
-                        offset += written;
-                        submitted += written / 2;
-                        if (written < requested) shortWrites++;
-                    } else if (written == 0) {
+                while (offset < requestedSamples && audioThreadRunning && !audioPaused) {
+                    int requested = requestedSamples - offset;
+                    int wrote = track.write(block, offset, requested, AudioTrack.WRITE_BLOCKING);
+                    if (wrote > 0) {
+                        offset += wrote;
+                        if (wrote < requested) shortWrites++;
+                        // WRITE_BLOCKING counts samples, not frames.
+                        writtenFrames += wrote / 2;
+                    } else if (wrote == 0) {
                         shortWrites++;
                         break;
                     } else {
-                        Log.w("NightlaneAudio", "AudioTrack write returned " + written);
+                        Log.w("NightlaneAudio", "AudioTrack write returned " + wrote);
                         audioThreadRunning = false;
                         break;
                     }
                 }
-                long now = android.os.SystemClock.elapsedRealtime();
+                if (!audioStarted && writtenFrames >= Math.min(2048,
+                        Math.max(256, NativeAudioBufferPolicy.startupWatermark(capacity)))) {
+                    if (!audioPaused && audioThreadRunning) {
+                        try { track.play(); audioStarted = true; }
+                        catch (IllegalStateException failure) {
+                            Log.e("NightlaneAudio", "Unable to begin primed audio stream", failure);
+                            audioThreadRunning = false;
+                        }
+                    }
+                }
                 if (now - lastReport >= 10000) {
-                    Log.i("NightlaneAudio", "submittedFrames=" + submitted
-                        + " shortWrites=" + shortWrites
-                        + " playbackHead=" + track.getPlaybackHeadPosition()
-                        + " bufferBytes=" + bufferBytes);
+                    long produced = nativeAudioProducedFrames() & 0xffffffffL;
+                    long newFrames = (produced - lastProduced) & 0xffffffffL;
+                    double elapsed = Math.max(0.001, (now - lastReport) / 1000.0);
+                    Log.i("NightlaneAudio", "gameProducedFps=" + Math.round(newFrames / elapsed)
+                        + " outputSubmittedFps=" + Math.round(writtenFrames / Math.max(.001, (now - startedAt) / 1000.0))
+                        + " ringAvailable=" + available + "/" + capacity
+                        + " outputQueued=" + queued + " peakQueue=" + peakQueue
+                        + " AndroidUnderruns=" + track.getUnderrunCount()
+                        + " shortWrites=" + shortWrites + " emptyReads=" + emptyReads
+                        + " producerWaits=" + waitingCycles
+                        + " (needs 48000 game samples/s)");
                     lastReport = now;
-                    submitted = 0;
-                    shortWrites = 0;
+                    lastProduced = produced;
+                    peakQueue = 0;
+                    shortWrites = emptyReads = waitingCycles = 0;
                 }
             }
         }, "nightlane-audio");
@@ -544,6 +620,7 @@ public final class EngineActivity extends Activity {
 
     private void stopAudio() {
         audioThreadRunning = false;
+        audioStarted = false;
         if (audioThread != null) audioThread.interrupt();
         if (audio != null) {
             try { audio.pause(); audio.flush(); audio.stop(); }
@@ -766,8 +843,11 @@ public final class EngineActivity extends Activity {
         if (!engineCoreLoaded) return;
         running = true; devices.start(); handler.post(tick);
         if (audio != null && audioPaused) {
-            try { audio.play(); audioPaused = false; }
-            catch (IllegalStateException error) { Log.e("NightlaneAudio", "Resume playback failed", error); }
+            audioPaused = false;
+            if (audioStarted) {
+                try { audio.play(); }
+                catch (IllegalStateException error) { Log.e("NightlaneAudio", "Resume playback failed", error); }
+            }
         }
     }
     @Override protected void onPause() {
