@@ -50,6 +50,10 @@ class NativeAudioJitterSafetyTests(unittest.TestCase):
         self.assertIn("#[cfg(target_os = \"android\")]", gpu)
         self.assertIn('name(format!("pipeline-compile-{i}"))', gpu)
         self.assertIn("let p = compile_pipeline(&dev, &lost, &job, disk.as_ref());", gpu)
+        self.assertIn("pipeline_last_compile_request.elapsed() < Duration::from_secs(8)", gpu)
+        self.assertIn("!self.pipe_pending.is_empty()", gpu)
+        bridge = source("vendor/fivestar/EngineBridge.c")
+        self.assertIn("if (!fatal || !g_vm || !g_activity || !g_set_status_method) return;", bridge)
 
 if __name__ == "__main__":
     unittest.main()
