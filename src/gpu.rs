@@ -1682,6 +1682,13 @@ impl Gpu {
         // 45k cap, but still requires a complete CPU recovery source.
         let pressure = MEMORY_PRESSURE.swap(0, Ordering::Relaxed);
         let under_pressure = pressure >= 10;
+        // Staging buffers in this pool have completed all GPU work. Free
+        // these first on memory pressure, before touching engine-owned assets.
+        if under_pressure && !self.readback_pool.is_empty() {
+            let freed = self.readback_pool.iter().map(Buffer::size).sum::<u64>();
+            self.readback_pool.clear();
+            log(&format!("gpu pressure: released {} KiB of idle readback staging; guest resources unchanged", freed >> 10));
+        }
         let scan_interval = if under_pressure { 60 } else { 300 };
         // Preserve a callback until the scan cooldown expires.
         if under_pressure && self.eviction_pending.is_empty()
@@ -1700,6 +1707,7 @@ impl Gpu {
                 if b.gpu.is_none()
                     || !can_restore_buffer(b.restore_usage.is_some(), b.restore_zero, b.restore_data.is_some())
                     || !resource_cold(self.presents, b.born_frame, b.last_used_frame, GPU_EVICT_COLD_FRAMES)
+                    || self.is_bound(index as u32) || self.used(index as u32)
                 { return None; }
                 Some((b.last_used_frame.unwrap_or(b.born_frame), index as u32))
             }).collect();
