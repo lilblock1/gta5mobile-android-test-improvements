@@ -4176,6 +4176,12 @@ impl Gpu {
             self.frame_waits += 1;
             self.frame_wait_ns = self.frame_wait_ns.saturating_add(elapsed);
             self.frame_wait_max_ns = self.frame_wait_max_ns.max(elapsed);
+            // Preserve the fence: uniform data must not be reused before GPU completion.
+            // Report long waits so a high average FPS cannot conceal frame hitches.
+            if elapsed >= 50_000_000 {
+                log(&format!("nightlane GPU frame-slot stall: {:.2} ms (slot {})",
+                    elapsed as f64 / 1_000_000.0, self.ubo_slot));
+            }
         }
         self.process_maps(false);
         self.pace_frame();
