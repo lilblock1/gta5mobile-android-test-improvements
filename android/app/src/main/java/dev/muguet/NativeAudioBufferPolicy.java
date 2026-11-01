@@ -39,6 +39,14 @@ final class NativeAudioBufferPolicy {
         return available < BLOCK_FRAMES && queued >= MIN_QUEUED_FRAMES;
     }
 
+    // Under 32 ms of queued output, briefly give the mixer an opportunity
+    // to produce genuine samples before inserting another 256-frame silence
+    // block. Keep at least 512 frames (~10.7 ms) queued for the short wait.
+    static boolean waitForBriefRefill(int available, long queued, boolean priming) {
+        return !priming && available == 0 &&
+            queued >= 512 && queued < MIN_QUEUED_FRAMES;
+    }
+
     static long queueDepth(long written, long played) {
         // AudioTrack's head uses a wrapping unsigned 32-bit frame count.
         // We only retain a bounded total; after a full wrap the caller

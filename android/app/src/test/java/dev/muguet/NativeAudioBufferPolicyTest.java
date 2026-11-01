@@ -24,6 +24,12 @@ public final class NativeAudioBufferPolicyTest {
         assertFalse(NativeAudioBufferPolicy.waitForProducer(1024, 2000, false));
         assertTrue(NativeAudioBufferPolicy.waitForProducer(512, 0, true));
         assertFalse(NativeAudioBufferPolicy.waitForProducer(1024, 0, true));
+        assertTrue(NativeAudioBufferPolicy.waitForBriefRefill(0, 512, false));
+        assertTrue(NativeAudioBufferPolicy.waitForBriefRefill(0, 1200, false));
+        assertFalse(NativeAudioBufferPolicy.waitForBriefRefill(0, 256, false));
+        assertFalse(NativeAudioBufferPolicy.waitForBriefRefill(0, 1536, false));
+        assertFalse(NativeAudioBufferPolicy.waitForBriefRefill(256, 1200, false));
+        assertFalse(NativeAudioBufferPolicy.waitForBriefRefill(0, 1200, true));
         assertEquals(2048, NativeAudioBufferPolicy.queueDepth(4096, 2048));
         assertEquals(0, NativeAudioBufferPolicy.queueDepth(2048, 4096));
     }
