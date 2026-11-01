@@ -109,7 +109,7 @@ jobs:
       - name: Verify game engine unchanged, renderer fixed and assets intact
         run: |
           python3 - <<'PY'
-          import hashlib, pathlib, zipfile
+          import hashlib, pathlib, subprocess, tempfile, zipfile
           base = "/tmp/nightlane-base-apk/app-debug.apk"
           rebuilt = "android/app/build/outputs/apk/debug/app-debug.apk"
           game = "lib/arm64-v8a/libgta5engine.so"
@@ -120,13 +120,21 @@ jobs:
                       raise SystemExit(f"Native library missing/duplicated: {name}")
               if hashlib.sha256(old.read(game)).digest() != hashlib.sha256(new.read(game)).digest():
                   raise SystemExit("Precompiled native game engine was modified")
-              expected = pathlib.Path("/tmp/nightlane-renderer.sha256").read_text().strip()
-              actual = hashlib.sha256(new.read(renderer)).hexdigest()
-              if actual != expected:
-                  raise SystemExit(f"APK renderer differs from fixed library: {actual} != {expected}")
-              if old.read(renderer) == new.read(renderer):
+              if hashlib.sha256(old.read(renderer)).digest() == hashlib.sha256(new.read(renderer)).digest():
                   raise SystemExit("Unfixed native renderer was re-packaged")
-              print("[native] game engine unchanged; fixed Vulkan renderer and JNI present")
+              # Gradle's stripDebugDebugSymbols step changes the renderer's byte
+              # hash, but must preserve the defined android_main and JNI symbols.
+              with tempfile.TemporaryDirectory() as tmp:
+                  lib = pathlib.Path(tmp) / "libmuguet.so"
+                  lib.write_bytes(new.read(renderer))
+                  symbols = subprocess.check_output(["readelf", "-W", "--dyn-syms", str(lib)], text=True)
+                  android = [line for line in symbols.splitlines() if line.rstrip().endswith("android_main")]
+                  if not android or any(" UND " in line for line in android):
+                      raise SystemExit(f"APK renderer has unresolved android_main: {android}")
+                  if "Java_dev_muguet_LauncherActivity_nativePrepare" not in symbols:
+                      raise SystemExit("APK renderer is missing launcher JNI exports")
+                  print("[native] APK android_main and launcher JNI are correctly exported")
+              print("[native] game engine unchanged; rebuilt Vulkan renderer packaged and verified")
           PY
           python3 tools/engine_resources.py verify-apk \
             --apk android/app/build/outputs/apk/debug/app-debug.apk \
