@@ -495,6 +495,7 @@ public final class EngineActivity extends Activity {
             long startedAt = android.os.SystemClock.elapsedRealtime();
             long lastReport = startedAt;
             long lastProduced = nativeAudioProducedFrames() & 0xffffffffL;
+            long lastWrittenFrames = 0;
             long peakQueue = 0;
             while (audioThreadRunning && !Thread.currentThread().isInterrupted()) {
                 if (audioPaused) {
@@ -601,7 +602,7 @@ public final class EngineActivity extends Activity {
                     long newFrames = (produced - lastProduced) & 0xffffffffL;
                     double elapsed = Math.max(0.001, (now - lastReport) / 1000.0);
                     Log.i("NightlaneAudio", "gameProducedFps=" + Math.round(newFrames / elapsed)
-                        + " outputSubmittedFps=" + Math.round(writtenFrames / Math.max(.001, (now - startedAt) / 1000.0))
+                        + " outputSubmittedFps=" + Math.round((writtenFrames - lastWrittenFrames) / elapsed)
                         + " ringAvailable=" + available + "/" + capacity
                         + " outputQueued=" + queued + " peakQueue=" + peakQueue
                         + " AndroidUnderruns=" + track.getUnderrunCount()
@@ -610,6 +611,7 @@ public final class EngineActivity extends Activity {
                         + " (needs 48000 game samples/s)");
                     lastReport = now;
                     lastProduced = produced;
+                    lastWrittenFrames = writtenFrames;
                     peakQueue = 0;
                     shortWrites = emptyReads = waitingCycles = 0;
                 }
@@ -855,7 +857,9 @@ public final class EngineActivity extends Activity {
         if (engineCoreLoaded) { devices.stop(); clearInput(); }
         audioPaused = true;
         if (audio != null) {
-            try { audio.pause(); audio.flush(); } catch (IllegalStateException ignored) {}
+            // Keep the bounded queue across a short pause. Flushing resets
+            // playback accounting and can make the pump think it is forever full.
+            try { audio.pause(); } catch (IllegalStateException ignored) {}
         }
         super.onPause();
     }
