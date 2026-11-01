@@ -420,9 +420,13 @@ public final class EngineActivity extends Activity {
             vars.add("MUGUET_GPU_SOFTWARE_CLIP=1");
         if (cfg.optBoolean("gpu_cpu_bc", false))
             vars.add("MUGUET_GPU_CPU_BC=1");
-        // A literal 30/42/24 FPS target must be implemented by frame pacing
-        // rather than passing those integers to the game's internal frame mode.
-        if (fps > 0 && fps < 60)
+        // 30 FPS is handled by the game's own -frameLimit=2 mode. Repeating
+        // the same 30 Hz limit in the Vulkan thread creates two independent
+        // clocks and can make frame delivery uneven during cinematics.
+        // Intermediate/lower targets (24, 42, etc.) use the renderer pacer
+        // while the engine stays in its 60 Hz base mode. Thermal protection
+        // remains independently able to reduce the renderer rate.
+        if (fps > 0 && fps < 60 && fps != 30)
             vars.add("MUGUET_RENDER_FPS_LIMIT=" + fps);
         return vars.toArray(new String[0]);
     }
