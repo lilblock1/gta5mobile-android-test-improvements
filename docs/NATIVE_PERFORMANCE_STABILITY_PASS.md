@@ -8,7 +8,7 @@ landing or GitHub Actions success is not evidence of device FPS improvement.**
 
 1. **Reused mapped GPU staging**: map-async readback buffers are eligible for
    bounded reuse only after a successful map, the mapped range is dropped and
-   `unmap()` has completed. Maximum 4 buffers and 8 MiB. Failed and
+   `unmap()` has completed. Maximum 4 buffers and 8 MiB, or disable the feature via the launcher setting. Failed and
    outstanding buffers are never recycled. Original readback completion flags
    and engine waits remain in place. Report reuse hits, misses, pending maps,
    completions and 50 ms+ stalls.
@@ -32,7 +32,8 @@ landing or GitHub Actions success is not evidence of device FPS improvement.**
    `PG_HTTPFS_READAHEAD_KB=64` or `0`; the process accepts 0-256 KiB.
    Foreground game reads are unchanged, and game files are never modified.
    Missing files are retried instead of permanently caching missing FDs.
-6. **Protection for the existing renderer**: no unsupported Vulkan driver
+6. **Touch aiming**: drag free space on the right, or drag from AIM/FIRE. A short decaying right-stick hold keeps swipes visible to the gamepad input thread. Full deflection is reached at 96 scaled pixels (previously 320). A toggleable free-aim preference is enabled by default.
+7. **Protection for the existing renderer**: no unsupported Vulkan driver
    overrides, no dropped GPU fences, no guest-memory truncation, no forced
    guest texture destruction, no new engine chunk manager.
 
