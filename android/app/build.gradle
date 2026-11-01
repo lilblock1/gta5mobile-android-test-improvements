@@ -17,8 +17,8 @@ android {
         applicationId 'dev.muguet.test'
         minSdk 29
         targetSdk 36
-        versionCode 16
-        versionName '0.2.1-native-precache'
+        versionCode 17
+        versionName '0.2.2-audio-overlay'
         buildConfigField 'boolean', 'NATIVE_ONLY', nativeOnlyBuild ? 'true' : 'false'
         ndk { abiFilters 'arm64-v8a' }
     }
