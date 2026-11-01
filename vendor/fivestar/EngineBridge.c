@@ -383,11 +383,13 @@ static void nativeUpdatePad(JNIEnv *env, jobject thiz, jobjectArray keys,
   PGPadState pad;
   memset(&pad, 0, sizeof pad);
 
-  // Camera look -> right stick (up-positive, matching the engine's convention).
-  // lookDX/lookDY are pixel deltas this pump; 320 px maps to full stick deflection.
-  if (lookDX != 0.0f || lookDY != 0.0f) {
-    pad.rightX = fmaxf(-1.0f, fminf(1.0f, pad.rightX + lookDX / 320.0f));
-    pad.rightY = fmaxf(-1.0f, fminf(1.0f, pad.rightY - lookDY / 320.0f));
+  // Right-stick input uses the Java touch displacement already scaled by
+  // sensitivity. The old /320 mapping made ordinary short drags disappear
+  // into the game's stick deadzone, especially while aiming down sights.
+  // 96 scaled pixels = full stick deflection; clamp before publishing.
+  if (isfinite(lookDX) && isfinite(lookDY)) {
+    pad.rightX = fmaxf(-1.0f, fminf(1.0f, lookDX / 96.0f));
+    pad.rightY = fmaxf(-1.0f, fminf(1.0f, -lookDY / 96.0f));
   }
 
   // Walk the pressed key set once and set the corresponding pad bits / axes.
