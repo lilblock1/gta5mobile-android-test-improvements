@@ -9,7 +9,8 @@ import java.nio.file.Files;
 // process reads it here rather than from Rust, whose android_main has not run yet.
 // Clamped so a damaged config can never leave touch look unusable.
 final class LookSensitivity {
-    static final float MIN = 0.25f, MAX = 4f, DEFAULT = 1f;
+    static final float MIN = 0.25f, MAX = 12f, DEFAULT = 1f;
+    static final int MAX_PROGRESS = 48;
     private LookSensitivity() {}
 
     static float fromConfig(File config) {
@@ -22,7 +23,12 @@ final class LookSensitivity {
         } catch (Exception e) { return DEFAULT; }
     }
 
-    // 1..15 keeps a non-zero gain; 4/4 = 1.0 matches the shipped tuning.
-    static float fromSlider(int progress) { return Math.max(1, Math.min(15, progress)) / 4.0f; }
-    static int toSlider(float gain) { return Math.max(1, Math.min(15, Math.round(gain * 4))); }
+    // 1..48 maps to 0.25x..12x; 4/4 = 1x preserves the previous default.
+    static float fromSlider(int progress) {
+        return Math.max(1, Math.min(MAX_PROGRESS, progress)) / 4.0f;
+    }
+    static int toSlider(float gain) {
+        if (!Float.isFinite(gain)) gain = DEFAULT;
+        return Math.max(1, Math.min(MAX_PROGRESS, Math.round(gain * 4)));
+    }
 }
