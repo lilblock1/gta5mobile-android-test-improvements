@@ -207,8 +207,14 @@ void pg_httpfs_configure(const char *manifestPath) {
 static int pgOpenAsset(PgFileCache *cache, uint32_t id) {
   for (uint32_t i = 0; i < PG_HTTPFS_OPEN_FILES; i++)
     if (cache->files[i].id == id) {
-      atomic_fetch_add(&pgHttpFsOpenHits, 1);
-      return cache->files[i].fd;
+      if (cache->files[i].fd >= 0) {
+        atomic_fetch_add(&pgHttpFsOpenHits, 1);
+        return cache->files[i].fd;
+      }
+      // A missing file may arrive later from the install/download path.
+      // Do not cache a permanent ENOENT for the entire game session.
+      cache->files[i].id = 0xffffffffu;
+      break;
     }
   char path[PATH_MAX];
   snprintf(path, sizeof path, "%s/%s", pgAssetRoot, pgAssets[id].path);
@@ -252,7 +258,8 @@ static int64_t pgReadAsset(PgFileCache *cache, uint32_t id, uint64_t offset,
     if (!n) break;
     done += (uint64_t)n;
   }
-  uint64_t elapsed = pgHttpFsNow() - started;
+  uint64_t finished = pgHttpFsNow();
+  uint64_t elapsed = finished >= started ? finished - started : 0;
   atomic_fetch_add(&pgHttpFsReadNs, elapsed);
   if (elapsed >= 15000000ull) atomic_fetch_add(&pgHttpFsSlowReads, 1);
   uint64_t maximum = atomic_load(&pgHttpFsMaxReadNs);
