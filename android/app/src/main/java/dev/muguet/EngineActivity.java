@@ -466,7 +466,7 @@ public final class EngineActivity extends Activity {
             audio = new AudioTrack.Builder()
                 .setAudioAttributes(new AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_GAME)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_GAME).build())
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
                 .setAudioFormat(new AudioFormat.Builder()
                     .setEncoding(encoding).setSampleRate(rate)
                     .setChannelMask(channels).build())
@@ -511,12 +511,13 @@ public final class EngineActivity extends Activity {
                 int remaining = Math.min(frames * 2, block.length);
                 int offset = 0;
                 while (offset < remaining && audioThreadRunning && !audioPaused) {
-                    int written = track.write(block, offset, remaining - offset,
+                    int requested = remaining - offset;
+                    int written = track.write(block, offset, requested,
                         AudioTrack.WRITE_BLOCKING);
                     if (written > 0) {
                         offset += written;
                         submitted += written / 2;
-                        if (written < remaining - offset) shortWrites++;
+                        if (written < requested) shortWrites++;
                     } else if (written == 0) {
                         shortWrites++;
                         break;
