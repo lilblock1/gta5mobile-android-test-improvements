@@ -455,6 +455,13 @@ static void nativeUpdatePadAnalog(JNIEnv *env, jobject thiz,
   PGUpdateVirtualPad(pad);
 }
 
+// A targeting-mode request is delivered to the game's own input thread,
+// where the player and targeting preferences can be updated safely.
+static void nativeSetTargetingMode(JNIEnv *env, jobject thiz, jint mode) {
+  (void)env; (void)thiz;
+  if (mode >= 0 && mode <= 3) PGSetTargetingMode(mode);
+}
+
 // --- audio --------------------------------------------------------------------
 // Pull one interleaved stereo block from the engine's audio ring into a Java
 // short[]. Returns the number of frames written (may be < requested if the ring
@@ -550,6 +557,7 @@ static JNINativeMethod g_methods[] = {
   {"nativeAttachSurface",     "(Landroid/view/Surface;)V",            (void*)nativeAttachSurface},
   {"nativeUpdatePad",         "([Ljava/lang/String;IZFFZ)V",          (void*)nativeUpdatePad},
   {"nativeUpdatePadAnalog",   "(FFFFFFI)V",                            (void*)nativeUpdatePadAnalog},
+  {"nativeSetTargetingMode", "(I)V",                                 (void*)nativeSetTargetingMode},
   {"nativeAudio",             "([SI)I",                                (void*)nativeAudio},
   {"nativePauseMenuActive",   "()Z",                                  (void*)nativePauseMenuActive},
   {"nativeLastInputDevice",   "()I",                                  (void*)nativeLastInputDevice},
