@@ -571,6 +571,14 @@ public final class EngineActivity extends Activity {
                     catch (InterruptedException stop) { return; }
                     continue;
                 }
+                if (NativeAudioBufferPolicy.waitForBriefRefill(available, queued, priming)) {
+                    // The device still has audible samples queued: avoid
+                    // replacing a short producer scheduling gap with silence.
+                    waitingCycles++;
+                    try { Thread.sleep(2); }
+                    catch (InterruptedException stop) { return; }
+                    continue;
+                }
                 if (priming && available == 0) {
                     // Do not start AudioTrack on an entirely empty game ring.
                     // The game can load a long cutscene before publishing the
