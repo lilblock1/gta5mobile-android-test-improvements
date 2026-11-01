@@ -55,6 +55,7 @@ public final class EngineActivity extends Activity {
                                                float lookDX, float lookDY, boolean analog);
     private static native void nativeUpdatePadAnalog(float lx, float ly, float rx, float ry,
                                                      float lt, float rt, int buttons);
+    private static native void nativeSetTargetingMode(int mode);
     private static native int nativeAudio(short[] out, int maxFrames);
     private static native boolean nativePauseMenuActive();
     private static native int nativeLastInputDevice();
@@ -279,6 +280,10 @@ public final class EngineActivity extends Activity {
             nativeStartUptimeMs = android.os.SystemClock.elapsedRealtime();
             nativeStart(gameDir.getAbsolutePath(), manifest.getAbsolutePath(), startMode,
                         width, height, frameLimit);
+            // Free aim lets the right thumb steer the reticle while LT is held.
+            // Users who prefer GTA's assisted lock-on can disable it in Settings.
+            if (config.optBoolean("nightlane_touch_free_aim", true))
+                nativeSetTargetingMode(3);
             if (!muted) startAudio();
             running = true;
             handler.post(tick);
