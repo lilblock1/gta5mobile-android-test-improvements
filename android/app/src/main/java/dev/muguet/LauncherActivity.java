@@ -190,7 +190,7 @@ public final class LauncherActivity extends Activity {
     private ProgressBar progress;
     private Spinner mode, heap, streamingBudget, worldstreamMode, msaaMode, frameQueue, nativeCpuWorkers, pipelineWorkers;
     private Spinner nightlanePresent, nightlaneSharpness, nightlaneLod, nightlaneHudSize, nightlaneHudOpacity;
-    private CheckBox nightlaneThermal, nightlaneCompactHud, automaticHeap, readAhead, shadowFix;
+    private CheckBox nightlaneThermal, nightlaneCompactHud, touchFreeAim, automaticHeap, readAhead, shadowFix;
     private static final double[] STREAMING_BUDGETS = {0.35, 0.25, 0.15};
     private EditText scale, name, magnetField, relayUrl, relayRoom, relayKey;
     private CheckBox mute, multiplayer, cpuBc, softwareClip;
@@ -526,6 +526,8 @@ public final class LauncherActivity extends Activity {
                 "balanced".equals(lodMode) ? 1 : 0);
         nightlaneThermal = check(column, "Adaptive thermal FPS protection (Severe 42 / Critical 30 / Emergency 24)",
             settings.optBoolean("nightlane_thermal_adaptive", true));
+        touchFreeAim = check(column, "Free aiming for touch controls (lets right-thumb swipe steer your aim while holding AIM)",
+            settings.optBoolean("nightlane_touch_free_aim", true));
         nightlaneCompactHud = check(column, "Compact touch HUD — group secondary buttons under MORE",
             settings.optBoolean("nightlane_compact_hud", true));
         double savedHudScale = settings.optDouble("nightlane_hud_scale", 0.85);
@@ -827,6 +829,7 @@ public final class LauncherActivity extends Activity {
                 new double[]{0.15, 0.30, 0.45}[nightlaneSharpness.getSelectedItemPosition()]);
             settings.put("nightlane_thermal_adaptive", nightlaneThermal.isChecked());
             settings.put("nightlane_compact_hud", nightlaneCompactHud.isChecked());
+            settings.put("nightlane_touch_free_aim", touchFreeAim.isChecked());
             settings.put("nightlane_hud_scale",
                 new double[]{0.85, 1.0, 1.15}[nightlaneHudSize.getSelectedItemPosition()]);
             settings.put("nightlane_hud_opacity",
