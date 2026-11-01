@@ -32,6 +32,12 @@ final class TouchControls extends View {
         float startX, startY, x, y;
         Grip(int button, float x, float y) { this.button = button; startX = this.x = x; startY = this.y = y; }
     }
+    interface LookListener { void onLook(float dx, float dy); }
+    private LookListener lookListener;
+    void setLookListener(LookListener listener) { lookListener = listener; }
+    private void look(float dx, float dy) {
+        if (lookListener != null) lookListener.onLook(dx, dy);
+    }
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final ArrayList<Button> buttons = new ArrayList<>();
     private final HashMap<Integer, Grip> grips = new HashMap<>();
@@ -156,7 +162,7 @@ final class TouchControls extends View {
                 Grip grip = grips.get(event.getPointerId(i));
                 if (grip == null) continue;
                 float x = event.getX(i) / density, y = event.getY(i) / density;
-                if (grip.button != -2 && !isWheel(grip)) GameActivity.nativeLook((x - grip.x) * 3 * lookSensitivity, (y - grip.y) * 3 * lookSensitivity);
+                if (grip.button == -1) look((x - grip.x) * 3 * lookSensitivity, (y - grip.y) * 3 * lookSensitivity);
                 grip.x = x; grip.y = y;
             }
         } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP) grips.remove(event.getPointerId(index));
@@ -191,7 +197,7 @@ final class TouchControls extends View {
                     double length = Math.hypot(dx, dy);
                     if (length > 10) {
                         float push = (float) (40 * lookSensitivity * Math.min((length - 10) / 45, 1) / length);
-                        GameActivity.nativeLook(dx * push, dy * push);
+                        look(dx * push, dy * push);
                     }
                 }
             }
