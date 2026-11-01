@@ -566,8 +566,9 @@ public final class LauncherActivity extends Activity {
             pauseDownload.setEnabled(false);
             status.setText("Pausing download…");
         });
-        column.addView(pauseDownload);
         column.addView(play);
+        // Both download and pause controls belong on the Play tab, not Settings.
+        column.addView(pauseDownload);
         // Restore the original first-Play HTTPS installer on an explicit button.
         // It downloads independently of native graphics initialization.
         downloadGameButton = new Button(this);

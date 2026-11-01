@@ -13,6 +13,8 @@ class FastNativeRepackPolicy(unittest.TestCase):
         self.assertIn('downloadGameButton.setEnabled(true);', launcher)
         self.assertIn('else if (activity != null) launch(activity);', launcher)
         self.assertIn('GameDataInstaller.HTTPS', launcher)
+        self.assertLess(launcher.index("column.addView(play);"),
+                        launcher.index("column.addView(pauseDownload);"))
         self.assertNotIn('downloadGameButton.setEnabled(!ready && folder.isEmpty())', launcher)
 
     def test_fast_workflow(self):
