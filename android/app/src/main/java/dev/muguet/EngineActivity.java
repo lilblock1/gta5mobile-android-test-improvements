@@ -81,6 +81,11 @@ public final class EngineActivity extends Activity {
     private final HashSet<String> keyboardKeys = new HashSet<>();
     private final HashSet<Integer> padKeys = new HashSet<>();
     private float accLookX, accLookY;
+    // The game polls the virtual pad independently of the Java 60 Hz pump.
+    // Retain a recent swipe briefly so its camera input cannot fall between
+    // polls at 20-40 game FPS; stop immediately when the finger lifts.
+    private float lastTouchLookX, lastTouchLookY;
+    private long lastTouchLookAt;
     private long fpsAt, fpsFrames, skippedAt, lastFps;
     private long nativeStartUptimeMs;
     private boolean missingFrameWarningShown;
@@ -437,6 +442,7 @@ public final class EngineActivity extends Activity {
     private void clearInput() {
         keyboardKeys.clear(); padKeys.clear();
         lx = ly = rx = ry = lt = rt = 0; accLookX = accLookY = 0;
+        lastTouchLookX = lastTouchLookY = 0; lastTouchLookAt = 0;
         if (controls != null) controls.release();
         nativeUpdatePad(new String[0], 0, false, 0, 0, false);
     }
@@ -502,11 +508,33 @@ public final class EngineActivity extends Activity {
             if (down(KeyEvent.KEYCODE_BUTTON_R1)) keys.add("KeyQ");
             if (down(KeyEvent.KEYCODE_BUTTON_START)) keys.add("Escape");
             if (down(KeyEvent.KEYCODE_BUTTON_SELECT)) keys.add("KeyV");
-            accLookX += rx * 320; accLookY += ry * 320;
+            // Swipes need to survive long enough for the native gamepad
+            // polling thread to read the stick. The retained input is bounded
+            // to 48 ms and only active while a camera/aim finger is still down.
+            // It is never repeated after release or a lost-focus clearInput().
+            boolean cameraFinger = controls != null && controls.hasCameraFinger();
+            long now = System.nanoTime();
+            float lookX = accLookX, lookY = accLookY;
+            if (cameraFinger && (lookX != 0 || lookY != 0)) {
+                lastTouchLookX = lookX;
+                lastTouchLookY = lookY;
+                lastTouchLookAt = now;
+            } else if (cameraFinger && lastTouchLookAt != 0
+                    && now - lastTouchLookAt < 48_000_000L) {
+                float remaining = 1f - (float)(now - lastTouchLookAt) / 48_000_000f;
+                lookX = lastTouchLookX * remaining;
+                lookY = lastTouchLookY * remaining;
+            } else {
+                lastTouchLookX = lastTouchLookY = 0;
+                lastTouchLookAt = 0;
+            }
+            if (rx != 0 || ry != 0) {
+                lookX += rx * 96f;
+                lookY += ry * 96f;
+            }
 
-            // Consume the accumulated look delta each pump.
             nativeUpdatePad(keys.toArray(new String[0]), touchButtons, horn,
-                            accLookX, accLookY, true);
+                            lookX, lookY, true);
             accLookX = 0; accLookY = 0;
 
             updateFps();
