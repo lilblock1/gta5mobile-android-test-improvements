@@ -517,6 +517,10 @@ static jlong nativeAudioProducedFrames(JNIEnv *env, jobject thiz) {
   (void)env; (void)thiz;
   return (jlong)PGProducedAudioFrames();
 }
+static jlong nativeAudioCallbackCount(JNIEnv *env, jobject thiz) {
+  (void)env; (void)thiz;
+  return (jlong)PGOutputCallbackCount();
+}
 
 static jlong nativeAudioBufferState(JNIEnv *env, jobject thiz) {
   (void)env; (void)thiz;
@@ -655,6 +659,7 @@ static JNINativeMethod g_methods[] = {
   {"nativeAudio",             "([SI)I",                                (void*)nativeAudio},
   {"nativeAudioBufferState", "()J",                                  (void*)nativeAudioBufferState},
   {"nativeAudioProducedFrames", "()J",                                (void*)nativeAudioProducedFrames},
+  {"nativeAudioCallbackCount", "()J",                                  (void*)nativeAudioCallbackCount},
   {"nativeAudioReport",       "(Ljava/lang/String;)V",               (void*)nativeAudioReport},
   {"nativePauseMenuActive",   "()Z",                                  (void*)nativePauseMenuActive},
   {"nativeLastInputDevice",   "()I",                                  (void*)nativeLastInputDevice},

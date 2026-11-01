@@ -441,6 +441,16 @@ uint32_t PGProducedAudioFrames(void) {
   _Atomic uint32_t *header = pg_pointer(&env, ring, 64 + (u64)capacity * 8);
   return atomic_load_explicit(header, memory_order_acquire);
 }
+// The browser AudioWorklet increments header[3] for each consumer callback.
+// In the reported silent session no consumer callback ran at all; observe this
+// separately from the engine's producer frame counter.
+uint32_t PGOutputCallbackCount(void) {
+  uint64_t ring = atomic_load_explicit(&audioRing, memory_order_acquire);
+  uint32_t capacity = atomic_load_explicit(&audioCapacity, memory_order_acquire);
+  if (!ring || !capacity) return 0;
+  _Atomic uint32_t *header = pg_pointer(&env, ring, 64 + (u64)capacity * 8);
+  return atomic_load_explicit(header + 3, memory_order_acquire);
+}
 void PGGetAudioDiagnostics(uint64_t *underflow, uint64_t *overflow) {
   if (underflow) *underflow = atomic_load(&audioUnderflowFrames);
   if (overflow) *overflow = atomic_load(&audioOverflowFrames);
