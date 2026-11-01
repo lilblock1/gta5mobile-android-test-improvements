@@ -55,4 +55,5 @@ int32_t PGTargetingMode(void);
 void PGSetTargetingMode(int32_t mode);
 // The engine's pause menu / frontend is open.
 bool PGPauseMenuActive(void);
-void PGFillAudio(float *left, float *right, uint32_t count);
+uint32_t PGFillAudio(float *left, float *right, uint32_t count);
+void PGGetAudioDiagnostics(uint64_t *underflow, uint64_t *overflow);
