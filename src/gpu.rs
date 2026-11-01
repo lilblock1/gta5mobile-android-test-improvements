@@ -1306,6 +1306,10 @@ pub struct Gpu {
     fps_t0: Instant,
     fps_n0: u64,
     fps_d0: u64,
+    // Rolling frame-gap distribution; measured after presentation and includes
+    // normal pacing, so p99 identifies real stalls instead of just average FPS.
+    frame_last_at: Option<Instant>,
+    frame_gaps_ms: VecDeque<f32>,
     // Frame-slot waits protect in-flight uniforms. Measure rather than remove.
     frame_waits: u64,
     frame_wait_ns: u64,
@@ -1523,6 +1527,7 @@ impl Gpu {
             frame_queue, last_submit: None, vb_avail: [0; 16],
             dbg_idx: if dbg != 0 { dbg + 424 } else { 0 },
             draws: 0, skipped: 0, presents: 0, pipe_creates: 0, fps_t0: Instant::now(), fps_n0: 0, fps_d0: 0,
+            frame_last_at: None, frame_gaps_ms: VecDeque::with_capacity(600),
             frame_waits: 0, frame_wait_ns: 0, frame_wait_max_ns: 0,
             explicit_fence_waits: 0, explicit_fence_ns: 0, explicit_fence_max_ns: 0,
             errors, lost, inflight: Arc::new(AtomicU64::new(0)), submits: 0, submits0: 0, passes: 0, passes0: 0,
@@ -3257,6 +3262,12 @@ impl Gpu {
         for f in &pi.rt_formats { key.push(f.map(|f| format_id(f)).unwrap_or(-1)); }
         key.extend([-7, pi.ds_format.map(format_id).unwrap_or(-1), pi.samples as i64, pi.ro_depth as i64, pi.ro_stencil as i64]);
         let _ = (vs_id, ps_id);
+        // Workers may finish in the middle of a render frame. Drain only
+        // already-ready results before skipping a draw; never wait for a
+        // compiler thread or block the Vulkan submission thread.
+        if matches!(self.pipelines.get(&key), Some(PipeEntry::Pending)) {
+            self.collect_pipelines();
+        }
         match self.pipelines.get(&key) {
             Some(PipeEntry::Done(p)) => return p.clone(),
             Some(PipeEntry::Pending) => { self.pending_skips += 1; return None; }
@@ -3993,7 +4004,7 @@ impl Gpu {
             if status == 0 { i += 1; continue; }
             let pm = self.pending_maps.swap_remove(i);
             let PendingMap { buf, kind, started, .. } = pm;
-            let was_readback = matches!(kind, MapKind::Readback { .. });
+            let was_readback = matches!(&kind, MapKind::Readback { .. });
             // A failed mapping (an invalid buffer, a lost device) must not take
             // the renderer down, and the engine must not wait forever for a
             // readback that will not arrive: report it and answer anyway.
@@ -4286,6 +4297,11 @@ impl Gpu {
             self.flush();
         }
         self.collect_pipelines();
+        let now = Instant::now();
+        if let Some(last) = self.frame_last_at.replace(now) {
+            if self.frame_gaps_ms.len() >= 600 { self.frame_gaps_ms.pop_front(); }
+            self.frame_gaps_ms.push_back(now.duration_since(last).as_secs_f32() * 1000.0);
+        }
         self.presents += 1;
         PRESENTS.store(self.presents, Ordering::Relaxed);
         self.trim_gpu_buffers();
@@ -4374,6 +4390,15 @@ impl Gpu {
                 frames as f64 / dt, crate::footprint_mb(), crate::runtime_memory_mb(), frames, self.clears_folded, (self.draws - self.fps_d0) / frames.max(1), self.pending_skips - self.pending_skips0, (self.submits - self.submits0) as f64 / frames.max(1) as f64,
                 (self.passes - self.passes0) as f64 / frames.max(1) as f64, self.skipped, self.pipe_creates, self.bind_groups.len(), self.errors.load(Ordering::Relaxed)
             ));
+            if let (Some(p50), Some(p99)) = (
+                frame_gap_percentile(&self.frame_gaps_ms, 0.50),
+                frame_gap_percentile(&self.frame_gaps_ms, 0.99)
+            ) {
+                log(&format!(
+                    "frame-time gaps (rolling {} frames): p50 {:.2} ms, p99 {:.2} ms, approx p99-gap FPS {:.1}; includes frame cap and presentation",
+                    self.frame_gaps_ms.len(), p50, p99, 1000.0 / p99.max(0.001)
+                ));
+            }
             #[cfg(target_os = "android")]
             if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
                 log(&format!(
@@ -4615,6 +4640,15 @@ fn resource_cold(frame: u64, born: u64, last_used: Option<u64>, threshold: u64) 
 
 // Faster bounded selection: only the oldest recoverable candidates need
 // ordering. Deterministic tie breaking keeps behavior reproducible.
+fn frame_gap_percentile(values: &VecDeque<f32>, fraction: f32) -> Option<f32> {
+    if values.is_empty() { return None; }
+    let mut samples: Vec<f32> = values.iter().copied().filter(|x| x.is_finite() && *x >= 0.0).collect();
+    if samples.is_empty() { return None; }
+    samples.sort_unstable_by(f32::total_cmp);
+    let index = ((samples.len() - 1) as f32 * fraction.clamp(0.0, 1.0)).round() as usize;
+    samples.get(index).copied()
+}
+
 fn oldest_candidates(items: &mut Vec<(u64, u32)>, max: usize) {
     if items.len() > max {
         items.select_nth_unstable(max);
@@ -4663,6 +4697,14 @@ mod tests {
         assert!(!lazy_vertex_index_buffer(1 | 0x80, 0));
         assert!(!lazy_vertex_index_buffer(1, 0x10));
         assert!(!lazy_vertex_index_buffer(1, 1));
+    }
+
+    #[test]
+    fn frame_gap_percentiles_detect_outliers() {
+        let samples = VecDeque::from(vec![16.0f32, 16.0, 20.0, 16.0, 585.0]);
+        assert_eq!(frame_gap_percentile(&samples, 0.50), Some(16.0));
+        assert_eq!(frame_gap_percentile(&samples, 0.99), Some(585.0));
+        assert_eq!(frame_gap_percentile(&VecDeque::new(), 0.99), None);
     }
 
     #[test]
