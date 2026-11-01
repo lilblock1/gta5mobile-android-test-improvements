@@ -5140,7 +5140,7 @@ fn after_entry() -> f32 { return 1.0f; }
             primitive: PrimitiveState::default(), depth_stencil: None, multisample: MultisampleState::default(),
             targets: vec![Some(ColorTargetState { format: TextureFormat::Rgba8Unorm, blend: None, write_mask: ColorWrites::ALL })],
         };
-        assert!(compile_pipeline(&device, &lost, &job).is_some());
+        assert!(compile_pipeline(&device, &lost, &job, None).is_some());
     }
 
     #[test]
