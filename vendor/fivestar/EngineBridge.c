@@ -488,6 +488,15 @@ static float pg_audio_soft_limit(float sample) {
   return copysignf(limited, gain);
 }
 
+// Snapshot of game-produced stereo frames (low 32 bits) and ring capacity
+// (high 32 bits). Does not dequeue sound or acquire a Java array.
+static jlong nativeAudioBufferState(JNIEnv *env, jobject thiz) {
+  (void)env; (void)thiz;
+  uint32_t capacity = 0;
+  uint32_t available = PGAvailableAudioFrames(&capacity);
+  return ((jlong)capacity << 32) | (jlong)available;
+}
+
 static jint nativeAudio(JNIEnv *env, jobject thiz, jshortArray out, jint maxFrames) {
   (void)thiz;
   if (!out || maxFrames <= 0) return 0;
@@ -614,6 +623,7 @@ static JNINativeMethod g_methods[] = {
   {"nativeUpdatePadAnalog",   "(FFFFFFI)V",                            (void*)nativeUpdatePadAnalog},
   {"nativeSetTargetingMode", "(I)V",                                 (void*)nativeSetTargetingMode},
   {"nativeAudio",             "([SI)I",                                (void*)nativeAudio},
+  {"nativeAudioBufferState", "()J",                                  (void*)nativeAudioBufferState},
   {"nativePauseMenuActive",   "()Z",                                  (void*)nativePauseMenuActive},
   {"nativeLastInputDevice",   "()I",                                  (void*)nativeLastInputDevice},
   {"nativeTouchContext",      "()I",                                  (void*)nativeTouchContext},
