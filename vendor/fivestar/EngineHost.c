@@ -417,6 +417,21 @@ int32_t PGLastInputDevice(void) {
 // Aggregate audio diagnostics, without blocking the engine mixer or logging
 // from the real-time read callback on each sample.
 static _Atomic uint64_t audioUnderflowFrames, audioOverflowFrames;
+// Never consume the ring when the output buffer is already full. Java uses this
+// snapshot to wait for a genuine, contiguous block before feeding AudioTrack.
+// It is only a telemetry snapshot; producer/consumer indices may advance
+// immediately afterward, so PGFillAudio still validates the actual fill.
+uint32_t PGAvailableAudioFrames(uint32_t *reportedCapacity) {
+  uint64_t ring = atomic_load_explicit(&audioRing, memory_order_acquire);
+  uint32_t capacity = atomic_load_explicit(&audioCapacity, memory_order_acquire);
+  if (reportedCapacity) *reportedCapacity = ring ? capacity : 0;
+  if (!ring || !capacity) return 0;
+  _Atomic uint32_t *header = pg_pointer(&env, ring, 64 + (u64)capacity * 8);
+  uint32_t read = atomic_load_explicit(header + 1, memory_order_relaxed);
+  uint32_t write = atomic_load_explicit(header, memory_order_acquire);
+  uint32_t available = write - read;
+  return available < capacity ? available : capacity;
+}
 void PGGetAudioDiagnostics(uint64_t *underflow, uint64_t *overflow) {
   if (underflow) *underflow = atomic_load(&audioUnderflowFrames);
   if (overflow) *overflow = atomic_load(&audioOverflowFrames);
