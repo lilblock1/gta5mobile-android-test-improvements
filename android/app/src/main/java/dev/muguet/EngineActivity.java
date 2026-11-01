@@ -124,6 +124,7 @@ public final class EngineActivity extends Activity {
 
         controls = new TouchControls(this, LookSensitivity.fromConfig(new File(getFilesDir(), "config.json")));
         controls.setVisibility(View.VISIBLE);
+        controls.setLookListener((dx, dy) -> { accLookX += dx; accLookY += dy; });
         root.addView(controls, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
@@ -241,7 +242,8 @@ public final class EngineActivity extends Activity {
         runOnUiThread(() -> {
             if (status == null) return;
             status.setText(text);
-            if (!text.isEmpty()) status.setVisibility(View.VISIBLE);
+            if (text.startsWith("Startup failed") || text.startsWith("Graphics") || text.startsWith("Game files missing")) status.setVisibility(View.VISIBLE);
+            else status.setVisibility(View.GONE);
         });
     }
 
