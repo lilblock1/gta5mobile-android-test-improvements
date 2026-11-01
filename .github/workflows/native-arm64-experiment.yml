@@ -153,11 +153,11 @@ jobs:
           commands = subprocess.check_output(["ninja", "-C", str(ninja[0].parent), "-t", "commands"], text=True)
           host = next((line for line in commands.splitlines() if "EngineBridge.c" in line), None)
           generated = next((line for line in commands.splitlines()
-                            if re.search(r"game_[^/ ]+\\.c", line)), None)
+                            if re.search(r"game_[^/ ]+\.c", line)), None)
           if not host or not generated:
               raise SystemExit("Missing native C compile commands")
           def last_opt(line):
-              flags = re.findall(r"(?<!\\S)-O([0-3sgz]|fast)(?!\\S)", line)
+              flags = re.findall(r"(?<!\S)-O([0-3sgz]|fast)(?!\S)", line)
               return flags[-1] if flags else None
           print("Handwritten host last -O:", last_opt(host),
                 "wasm2c generated game last -O:", last_opt(generated))
