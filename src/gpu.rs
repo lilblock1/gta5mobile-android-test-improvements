@@ -1536,7 +1536,7 @@ impl Gpu {
                     // the game and audio threads retain their own priority.
                     #[cfg(target_os = "android")]
                     unsafe {
-                        libc::setpriority(libc::PRIO_PROCESS, 0, 8);
+                        libc::setpriority(libc::PRIO_PROCESS, 0, 4);
                     }
                     loop {
                     let job = rx.lock().unwrap().recv();
