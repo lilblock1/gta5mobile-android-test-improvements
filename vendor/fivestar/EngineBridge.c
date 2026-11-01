@@ -154,10 +154,19 @@ static void engine_log_bridge(const char *message, void *context) {
   if (!message) return;
   LOGI("%s", message);
   native_log_to_file("native", message);
-  // Futex messages are tracing, not startup failures. Keep them in logs
-  // but don't cover the game with a misleading "futex wait" status.
+  // Keep detailed graphics/futex/streaming traces in native logs, but
+  // do not marshal them through JNI and post a UI runnable for every message.
+  // Besides flooding the former center-screen overlay, that churn can
+  // interrupt touch, audio and cutscene presentation on the UI thread.
   if (strncmp(message, "Futex wait at ", 14) == 0) return;
-  if (!g_vm || !g_activity || !g_set_status_method) return;
+  bool fatal = strncmp(message, "Startup failed:", 15) == 0
+      || strncmp(message, "Native boot stopped:", 20) == 0
+      || strncmp(message, "Graphics initialization failed:", 31) == 0
+      || strncmp(message, "Graphics validation failed:", 27) == 0
+      || strncmp(message, "Game files missing", 18) == 0
+      || strncmp(message, "Native engine library failed", 28) == 0
+      || strncmp(message, "Native engine: no rendered frames", 33) == 0;
+  if (!fatal || !g_vm || !g_activity || !g_set_status_method) return;
   JNIEnv *env = NULL;
   bool attached = false;
   if ((*g_vm)->GetEnv(g_vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
