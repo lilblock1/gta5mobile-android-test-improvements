@@ -3916,9 +3916,9 @@ impl Gpu {
         let size = requested.max(4);
         if self.readback_pool_enabled {
             if let Some(index) = self.readback_pool.iter().position(|b| {
-            b.size() >= size && b.size() <= size.saturating_mul(2)
-        }) {
-            self.readback_pool_hits += 1;
+                b.size() >= size && b.size() <= size.saturating_mul(2)
+            }) {
+                self.readback_pool_hits += 1;
                 return self.readback_pool.swap_remove(index);
             }
         }
