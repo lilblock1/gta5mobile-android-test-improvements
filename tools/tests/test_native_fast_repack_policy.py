@@ -43,9 +43,11 @@ class FastNativeRepackPolicy(unittest.TestCase):
         self.assertIn("lookSink.onLook(", touch)
         self.assertIn("GameActivity::nativeLook", touch)
         self.assertNotIn("GameActivity.nativeLook(", touch)
-        self.assertIn("accLookX + dx", engine)
-        self.assertIn("accLookY + dy", engine)
+        self.assertIn("new TouchControls(this, touchGain, true)", engine)
+        self.assertIn("touch.rightStickX, touch.rightStickY, true", engine)
         self.assertIn("nativeUpdatePad(keys.toArray", engine)
+        self.assertNotIn("accLookX + dx", engine)
+        self.assertNotIn("accLookY + dy", engine)
         self.assertIn("new TouchControls(this,", old)
 
     def test_native_surface_uses_reduced_internal_resolution(self):
