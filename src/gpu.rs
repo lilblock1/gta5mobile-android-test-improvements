@@ -30,6 +30,9 @@ const BG_LIMIT: usize = if cfg!(target_os = "android") { 4096 } else { 24000 };
 // the renderer. Keep a generous bounded cache on mobile and do not evict
 // pipelines that are still being compiled on worker threads.
 const PIPELINE_LIMIT: usize = if cfg!(target_os = "android") { 4096 } else { 16384 };
+// Never trust unbounded cache files or let driver-generated binaries grow
+// without limit. Pipeline binaries remain private on the user's device.
+const PIPELINE_DISK_CACHE_MAX: u64 = 32 * 1024 * 1024;
 
 pub struct SurfaceHandoff {
     pub instance: Instance,
@@ -1157,7 +1160,7 @@ fn gpu_scoped<T>(device: &Device, lost: &AtomicBool, what: &str, f: impl FnOnce(
     if failed { None } else { Some(v) }
 }
 
-fn compile_pipeline(device: &Device, lost: &AtomicBool, job: &PipeJob) -> Option<RenderPipeline> {
+fn compile_pipeline(device: &Device, lost: &AtomicBool, job: &PipeJob, cache: Option<&PipelineCache>) -> Option<RenderPipeline> {
     let vbs: Vec<Option<VertexBufferLayout>> = job.vbs.iter().map(|v| v.as_ref().map(|(stride, step, attrs)| VertexBufferLayout { array_stride: *stride, step_mode: *step, attributes: attrs })).collect();
     let desc = RenderPipelineDescriptor {
         label: Some(&job.label),
@@ -1168,7 +1171,7 @@ fn compile_pipeline(device: &Device, lost: &AtomicBool, job: &PipeJob) -> Option
         multisample: job.multisample,
         fragment: job.fmod.as_ref().map(|m| FragmentState { module: m, entry_point: Some("main"), compilation_options: Default::default(), targets: &job.targets }),
         multiview_mask: None,
-        cache: None,
+        cache,
     };
     let what = format!("pipeline {} (targets {:?}, depth {:?}, samples {})", job.label, job.targets, job.depth_stencil.as_ref().map(|d| d.format), job.multisample.count);
     gpu_scoped(device, lost, &what, |d| d.create_render_pipeline(&desc))
@@ -1258,6 +1261,13 @@ pub struct Gpu {
     pipelines: HashMap<Vec<i64>, PipeEntry>,
     pipeline_fifo: VecDeque<Vec<i64>>,
     pipeline_evictions: u64,
+    // Driver-managed Vulkan shader/pipeline cache. Valid only for this adapter
+    // and shader index; wgpu rejects stale binary formats with fallback=true.
+    pipeline_disk: Option<PipelineCache>,
+    pipeline_disk_path: Option<PathBuf>,
+    pipeline_disk_last_save: Instant,
+    pipeline_disk_saved_creates: u64,
+    pipeline_disk_write_busy: Arc<AtomicBool>,
     pipe_jobs: Option<std::sync::mpsc::Sender<(u64, PipeJob)>>,
     pipe_results: std::sync::mpsc::Receiver<(u64, Option<RenderPipeline>)>,
     pipe_pending: HashMap<u64, (Vec<i64>, Vec<VbReq>, String)>,
@@ -1389,7 +1399,8 @@ impl Gpu {
             | Features::FLOAT32_FILTERABLE | Features::INDIRECT_FIRST_INSTANCE | Features::RG11B10UFLOAT_RENDERABLE
             | Features::BGRA8UNORM_STORAGE | Features::DEPTH_CLIP_CONTROL | Features::CLIP_DISTANCES | Features::DUAL_SOURCE_BLENDING
 
-            | Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+            | Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
+            | Features::PIPELINE_CACHE;
         let info = adapter.get_info();
         let mut features = want & adapter.features();
         // The Adreno Vulkan driver loses the device when a shader uses clip
@@ -1464,6 +1475,37 @@ impl Gpu {
         });
         let shader_index: HashMap<String, serde_json::Value> = serde_json::from_str(&index_text).unwrap_or_default();
         log(&format!("shader index: {} entries from {}", shader_index.len(), shader_dir.display()));
+        // A wgpu cache can only contain driver data originally returned by
+        // PipelineCache::get_data(). Never load arbitrary shader binaries.
+        // Include the full index fingerprint plus the driver cache key.
+        let pipeline_cache_dir = std::env::var_os("NIGHTLANE_PIPELINE_CACHE_DIR").map(PathBuf::from);
+        let adapter_cache_key = if features.contains(Features::PIPELINE_CACHE) {
+            wgpu::util::pipeline_cache_key(&info)
+        } else { None };
+        let pipeline_disk_path = pipeline_cache_dir.and_then(|dir| {
+            let key = adapter_cache_key?;
+            let sanitized: String = key.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+            let index_hash = shader_index_fingerprint(index_text.as_bytes());
+            Some(dir.join(format!("native-02-{index_hash:016x}-{sanitized}.bin")))
+        });
+        let pipeline_disk = if let Some(file) = pipeline_disk_path.as_ref() {
+            let data = std::fs::metadata(file).ok().filter(|m| m.len() > 0 && m.len() <= PIPELINE_DISK_CACHE_MAX)
+                .and_then(|_| std::fs::read(file).ok());
+            if let Some(ref bytes) = data {
+                log(&format!("shader pipeline cache: loading {} KiB from {}", bytes.len() >> 10, file.display()));
+            } else { log("shader pipeline cache: cold start, will build cache as pipelines compile"); }
+            // SAFETY: only bytes persisted from wgpu PipelineCache::get_data
+            // are written to this app-private path; fallback rejects outdated
+            // driver/cache formats. No external blobs are supplied.
+            Some(unsafe { device.create_pipeline_cache(&PipelineCacheDescriptor {
+                label: Some("Nightlane persistent Vulkan pipeline cache"),
+                data: data.as_deref(), fallback: true,
+            }) })
+        } else {
+            log("shader pipeline cache: Vulkan driver did not expose persistent pipeline caching");
+            None
+        };
+        let pipeline_disk_write_busy = Arc::new(AtomicBool::new(false));
 
         let frame_pace = if cfg!(target_os = "android") {
             std::env::var("MUGUET_RENDER_FPS_LIMIT").ok()
@@ -1486,11 +1528,11 @@ impl Gpu {
                 .unwrap_or(if cfg!(target_os = "android") { 2 } else { 4 });
             log(&format!("shader pipeline workers: {compiler_workers}"));
             for i in 0..compiler_workers {
-                let (dev, lost, rx, tx) = (device.clone(), lost.clone(), job_rx.clone(), res_tx.clone());
+                let (dev, lost, rx, tx, disk) = (device.clone(), lost.clone(), job_rx.clone(), res_tx.clone(), pipeline_disk.clone());
                 std::thread::Builder::new().name(format!("pipeline-compile-{i}")).spawn(move || loop {
                     let job = rx.lock().unwrap().recv();
                     let Ok((id, job)) = job else { return };
-                    let p = compile_pipeline(&dev, &lost, &job);
+                    let p = compile_pipeline(&dev, &lost, &job, disk.as_ref());
                     if tx.send((id, p)).is_err() { return; }
                 }).expect("spawn compile thread");
             }
@@ -1520,6 +1562,8 @@ impl Gpu {
             s: State::new(), pdirty: true, last_pl: None, shader_index, shader_dir, next_uid: 1,
             bgl_cache: HashMap::new(), empty_bgl: None, pipelines: HashMap::new(),
             pipeline_fifo: VecDeque::new(), pipeline_evictions: 0,
+            pipeline_disk, pipeline_disk_path, pipeline_disk_last_save: Instant::now(),
+            pipeline_disk_saved_creates: 0, pipeline_disk_write_busy,
             compute: HashMap::new(), bind_groups: FifoCache::new(BG_LIMIT),
             bg_dependents: HashMap::new(), view_dependents: HashMap::new(),
             ubo_slots: (0..frame_queue.slots()).map(|_| Vec::new()).collect(), ubo_shared: Vec::new(), ubo_chunk: 0, ubo_off: 0,
@@ -2812,7 +2856,7 @@ impl Gpu {
             multisample: MultisampleState::default(),
             fragment: Some(FragmentState { module, entry_point: Some("fs"), compilation_options: Default::default(), targets: if color.is_some() { &targets } else { &[] } }),
             multiview_mask: None,
-            cache: None,
+            cache: self.pipeline_disk.as_ref(),
         })
     }
 
@@ -3304,7 +3348,7 @@ impl Gpu {
             self.pending_skips += 1;
             return None;
         }
-        let pl = compile_pipeline(&self.device, &self.lost, &job).map(|pipeline| { let uid = self.uid(); Rc::new(Pl { pipeline, uid, vb_req, label: job.label }) });
+        let pl = compile_pipeline(&self.device, &self.lost, &job, self.pipeline_disk.as_ref()).map(|pipeline| { let uid = self.uid(); Rc::new(Pl { pipeline, uid, vb_req, label: job.label }) });
         self.insert_pipeline(key, PipeEntry::Done(pl.clone()));
         pl
     }
@@ -3615,7 +3659,7 @@ impl Gpu {
             let layout = self.device.create_pipeline_layout(&PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&bgl)], immediate_size: 0 });
             let label = cprog.label.clone();
             let pl = self.scoped(&format!("compute pipeline {label}"), |d| d.create_compute_pipeline(&ComputePipelineDescriptor {
-                label: Some(&label), layout: Some(&layout), module: &cprog.module, entry_point: Some("main"), compilation_options: Default::default(), cache: None,
+                label: Some(&label), layout: Some(&layout), module: &cprog.module, entry_point: Some("main"), compilation_options: Default::default(), cache: self.pipeline_disk.as_ref(),
             }));
             let uid = self.uid();
             self.compute.insert(key.clone(), pl.map(|p| (p, bgl, uid, cprog)));
@@ -4340,6 +4384,7 @@ impl Gpu {
             }
         }
         self.log_fps();
+        self.maybe_save_pipeline_cache();
 
         // Record a fence only when this frame actually submitted GPU work.
         // Reusing the previous submission index on empty frames caused
@@ -4392,6 +4437,42 @@ impl Gpu {
         let actual = Instant::now();
         let next = deadline.checked_add(period).unwrap_or(actual + period);
         self.frame_due = Some(if next < actual { actual + period } else { next });
+    }
+
+    fn maybe_save_pipeline_cache(&mut self) {
+        let (Some(cache), Some(path)) = (self.pipeline_disk.as_ref(), self.pipeline_disk_path.as_ref()) else { return };
+        if self.lost.load(Ordering::Relaxed)
+            || self.pipeline_disk_write_busy.load(Ordering::Relaxed)
+            || self.pipe_creates < self.pipeline_disk_saved_creates.saturating_add(16)
+            || self.pipeline_disk_last_save.elapsed() < Duration::from_secs(30)
+        { return; }
+        self.pipeline_disk_last_save = Instant::now();
+        self.pipeline_disk_saved_creates = self.pipe_creates;
+        self.pipeline_disk_write_busy.store(true, Ordering::SeqCst);
+        let cache = cache.clone();
+        let path = path.clone();
+        let busy = self.pipeline_disk_write_busy.clone();
+        // Driver cache serialization and filesystem I/O never block the
+        // render thread. GitHub Actions checks compilation, phone tests
+        // will determine whether Adreno actually reuses these binaries.
+        let launch = std::thread::Builder::new().name("nightlane-cache-writer".into()).spawn(move || {
+            if let Some(data) = cache.get_data().filter(|v| !v.is_empty() && (v.len() as u64) <= PIPELINE_DISK_CACHE_MAX) {
+                if let Some(parent) = path.parent() {
+                    if std::fs::create_dir_all(parent).is_ok() {
+                        let temp = path.with_extension("tmp");
+                        if std::fs::write(&temp, &data).is_ok() {
+                            if std::fs::rename(&temp, &path).is_ok() {
+                                log(&format!("shader pipeline cache: saved {} KiB", data.len() >> 10));
+                            } else { let _ = std::fs::remove_file(&temp); }
+                        } else { let _ = std::fs::remove_file(&temp); }
+                    }
+                }
+            }
+            busy.store(false, Ordering::SeqCst);
+        });
+        if launch.is_err() {
+            self.pipeline_disk_write_busy.store(false, Ordering::SeqCst);
+        }
     }
 
     fn log_fps(&mut self) {
@@ -4648,6 +4729,11 @@ fn driver_needs_software_clip(name: &str, driver: &str, driver_info: &str) -> bo
 
 // Resource ages are measured in presented frames, not wall time. A resource
 // created recently is not considered cold just because it was never bound.
+fn shader_index_fingerprint(bytes: &[u8]) -> u64 {
+    // FNV-1a is only a cache-version fingerprint, never a security checksum.
+    bytes.iter().fold(0xcbf29ce484222325u64, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x100000001b3))
+}
+
 fn resource_cold(frame: u64, born: u64, last_used: Option<u64>, threshold: u64) -> bool {
     frame.saturating_sub(last_used.unwrap_or(born)) >= threshold
 }
@@ -4711,6 +4797,12 @@ mod tests {
         assert!(!lazy_vertex_index_buffer(1 | 0x80, 0));
         assert!(!lazy_vertex_index_buffer(1, 0x10));
         assert!(!lazy_vertex_index_buffer(1, 1));
+    }
+
+    #[test]
+    fn shader_index_fingerprint_changes_with_index_bytes() {
+        assert_eq!(shader_index_fingerprint(b"abc"), shader_index_fingerprint(b"abc"));
+        assert_ne!(shader_index_fingerprint(b"abc"), shader_index_fingerprint(b"abd"));
     }
 
     #[test]
