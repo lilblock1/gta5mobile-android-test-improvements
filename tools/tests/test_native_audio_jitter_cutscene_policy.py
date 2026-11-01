@@ -23,6 +23,8 @@ class NativeAudioJitterSafetyTests(unittest.TestCase):
         self.assertIn('{"nativeAudioProducedFrames", "()J"', bridge)
         self.assertIn("PGAvailableAudioFrames(&capacity)", bridge)
         self.assertIn("PGProducedAudioFrames()", bridge)
+        self.assertIn('{"nativeAudioReport",       "(Ljava/lang/String;)V"', bridge)
+        self.assertIn('native_log_to_file("audio-track", text)', bridge)
         self.assertIn("uint32_t real = PGFillAudio", bridge)
         self.assertIn("g_audioLastBlockWasGap", bridge)
 
@@ -41,6 +43,7 @@ class NativeAudioJitterSafetyTests(unittest.TestCase):
         self.assertIn("newFrames / elapsed", activity)
         self.assertIn("track.getUnderrunCount()", activity)
         self.assertIn("gameProducedFps=", activity)
+        self.assertIn("nativeAudioReport(report)", activity)
         self.assertIn("audioStarted = true", activity)
         self.assertNotIn("audio.play();\n        audioThread = new Thread", activity)
 
