@@ -1229,6 +1229,7 @@ pub struct Gpu {
     // Reuse only fully unmapped readback buffers. The pool is intentionally
     // small: no outstanding GPU copy, mapping or engine wait may reference it.
     readback_pool: Vec<Buffer>,
+    readback_pool_enabled: bool,
     readback_pool_hits: u64,
     readback_pool_misses: u64,
     readback_completions: u64,
@@ -1506,7 +1507,9 @@ impl Gpu {
             deferred_buffer_allocations: 0, restore_data_bytes: 0,
             evicted_buffers: 0, restored_buffers: 0, eviction_last_scan_frame: 0,
             eviction_pending: VecDeque::new(), eviction_scan_count: 0, eviction_scan_max_ns: 0,
-            readback_pool: Vec::new(), readback_pool_hits: 0, readback_pool_misses: 0,
+            readback_pool: Vec::new(),
+            readback_pool_enabled: std::env::var("NIGHTLANE_READBACK_REUSE").as_deref() != Ok("0"),
+            readback_pool_hits: 0, readback_pool_misses: 0,
             readback_completions: 0, readback_max_wait_ns: 0, readback_slow_50ms: 0,
             hud_last_sample: Instant::now(),
             frame_pace, frame_due: None,
@@ -3911,11 +3914,13 @@ impl Gpu {
     // remain resident; oversized and failed mappings are never cached.
     fn acquire_readback_buffer(&mut self, requested: u64) -> Buffer {
         let size = requested.max(4);
-        if let Some(index) = self.readback_pool.iter().position(|b| {
+        if self.readback_pool_enabled {
+            if let Some(index) = self.readback_pool.iter().position(|b| {
             b.size() >= size && b.size() <= size.saturating_mul(2)
         }) {
             self.readback_pool_hits += 1;
-            return self.readback_pool.swap_remove(index);
+                return self.readback_pool.swap_remove(index);
+            }
         }
         self.readback_pool_misses += 1;
         self.device.create_buffer(&BufferDescriptor {
@@ -4056,7 +4061,8 @@ impl Gpu {
                 self.readback_max_wait_ns = self.readback_max_wait_ns.max(ns);
                 if ns >= 50_000_000 { self.readback_slow_50ms += 1; }
             }
-            if mapped && !self.lost.load(Ordering::SeqCst) && buf.size() <= 8 * 1024 * 1024
+            if self.readback_pool_enabled && mapped && !self.lost.load(Ordering::SeqCst)
+                && buf.size() <= 8 * 1024 * 1024
                 && self.readback_pool.len() < 4
                 && self.readback_pool.iter().map(Buffer::size).sum::<u64>()
                     .saturating_add(buf.size()) <= 8 * 1024 * 1024
