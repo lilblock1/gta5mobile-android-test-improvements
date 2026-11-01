@@ -38,7 +38,13 @@ class NativeAudioJitterSafetyTests(unittest.TestCase):
         self.assertIn("NativeAudioBufferPolicy.queueDepth(writtenFrames, played)", activity)
         self.assertIn("NativeAudioBufferPolicy.waitForProducer(available, queued, priming)", activity)
         self.assertIn("queued >= NativeAudioBufferPolicy.TARGET_QUEUED_FRAMES", activity)
-        self.assertIn("if (priming && available == 0)", activity)
+        # Previously this unconditional empty-ring wait permanently disabled
+        # output whenever the game mixer produced no frames at startup.
+        self.assertIn("NativeAudioBufferPolicy.waitForInitialSamples(", activity)
+        self.assertIn("capacity > 0 && !bootstrapReported", activity)
+        self.assertIn("AudioTrack starting empty-ring bootstrap", activity)
+        self.assertIn("nativeAudioCallbackCount()", activity)
+        self.assertNotIn("if (priming && available == 0) {", activity)
         self.assertIn("int request = available > 0 ? Math.min(", activity)
         self.assertIn("newFrames / elapsed", activity)
         self.assertIn("track.getUnderrunCount()", activity)
