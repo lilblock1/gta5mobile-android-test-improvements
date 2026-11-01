@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "EngineHost.h"
@@ -465,31 +466,83 @@ static void nativeSetTargetingMode(JNIEnv *env, jobject thiz, jint mode) {
 }
 
 // --- audio --------------------------------------------------------------------
-// Pull one interleaved stereo block from the engine's audio ring into a Java
-// short[]. Returns the number of frames written (may be < requested if the ring
-// is short, which happens at startup and after a stall).
+// Deliver exactly the requested stereo frame count to AudioTrack, padding
+// missing mixer frames with silence. Keep the gain below full scale to avoid
+// clipping when game samples are louder than the Android output expects.
 #define AUDIO_CHUNK 2048
+#define AUDIO_RAMP_FRAMES 64u
 static float g_audioL[AUDIO_CHUNK], g_audioR[AUDIO_CHUNK];
+static bool g_audioLastBlockWasGap = true;
+static uint64_t g_audioLastDiagnosticNs;
+static uint64_t g_audioSubmittedFrames;
+
+static float pg_audio_soft_limit(float sample) {
+  if (!isfinite(sample)) return 0.0f;
+  // 15% headroom. Soft-knee limiting preserves transients instead of hard
+  // saturating the PCM output on loud dialogue/explosions.
+  const float gain = sample * 0.85f;
+  const float magnitude = fabsf(gain);
+  if (magnitude <= 0.80f) return gain;
+  float above = magnitude - 0.80f;
+  float limited = 0.80f + 0.19f * above / (0.19f + above);
+  return copysignf(limited, gain);
+}
 
 static jint nativeAudio(JNIEnv *env, jobject thiz, jshortArray out, jint maxFrames) {
   (void)thiz;
   if (!out || maxFrames <= 0) return 0;
-  jsize capacity = (*env)->GetArrayLength(env, out);
-  jint frames = maxFrames < capacity ? maxFrames : capacity;
+  // Java short[] contains 2 samples for each *stereo frame*.
+  jsize sampleCapacity = (*env)->GetArrayLength(env, out);
+  jint frames = maxFrames < sampleCapacity / 2 ? maxFrames : sampleCapacity / 2;
   if (frames > AUDIO_CHUNK) frames = AUDIO_CHUNK;
+  if (frames <= 0) return 0;
 
-  PGFillAudio(g_audioL, g_audioR, (uint32_t)frames);
-
+  uint32_t real = PGFillAudio(g_audioL, g_audioR, (uint32_t)frames);
+  const bool gap = real < (uint32_t)frames;
   jshort *dst = (jshort *)(*env)->GetPrimitiveArrayCritical(env, out, NULL);
   if (!dst) return 0;
   for (jint i = 0; i < frames; i++) {
-    float l = g_audioL[i], r = g_audioR[i];
-    l = l > 1.0f ? 1.0f : (l < -1.0f ? -1.0f : l);
-    r = r > 1.0f ? 1.0f : (r < -1.0f ? -1.0f : r);
+    float ramp = 1.0f;
+    if (i >= (jint)real) ramp = 0.0f;
+    else {
+      // The last valid 64 frames fade out before a mixer underrun, and
+      // the first 64 fade back in after a previous underrun. This removes
+      // clicks without interpolating or inventing audio samples.
+      if (g_audioLastBlockWasGap && i < AUDIO_RAMP_FRAMES)
+        ramp *= (float)(i + 1) / (float)AUDIO_RAMP_FRAMES;
+      if (gap && (uint32_t)(real - i) <= AUDIO_RAMP_FRAMES)
+        ramp *= (float)(real - i) / (float)AUDIO_RAMP_FRAMES;
+    }
+    float l = pg_audio_soft_limit(g_audioL[i] * ramp);
+    float r = pg_audio_soft_limit(g_audioR[i] * ramp);
     dst[i * 2]     = (jshort)(l * 32767.0f);
     dst[i * 2 + 1] = (jshort)(r * 32767.0f);
   }
   (*env)->ReleasePrimitiveArrayCritical(env, out, dst, 0);
+  g_audioLastBlockWasGap = gap;
+  g_audioSubmittedFrames += (uint64_t)frames;
+
+  // Log accumulated mixer underflows and overruns every 10 seconds. Audio
+  // glitches from a starved guest renderer then become diagnosable instead
+  // of being confused with sample-amplitude clipping.
+  struct timespec t = {0};
+  if (clock_gettime(CLOCK_MONOTONIC, &t) == 0) {
+    uint64_t ns = (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+    if (!g_audioLastDiagnosticNs) g_audioLastDiagnosticNs = ns;
+    if (ns - g_audioLastDiagnosticNs >= 10000000000ull) {
+      uint64_t underrun = 0, overrun = 0;
+      PGGetAudioDiagnostics(&underrun, &overrun);
+      char message[200];
+      snprintf(message, sizeof message,
+        "Native audio: submitted %llu stereo frames, cumulative underruns %llu frames, overruns %llu frames (48 kHz)",
+        (unsigned long long)g_audioSubmittedFrames,
+        (unsigned long long)underrun, (unsigned long long)overrun);
+      LOGI("%s", message);
+      native_log_to_file("audio", message);
+      g_audioLastDiagnosticNs = ns;
+      g_audioSubmittedFrames = 0;
+    }
+  }
   return frames;
 }
 
