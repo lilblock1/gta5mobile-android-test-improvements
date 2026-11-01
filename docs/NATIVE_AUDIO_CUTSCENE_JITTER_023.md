@@ -19,7 +19,7 @@ stutter when the engine, renderer or storage falls behind.
 - Partial native blocks are read as partial blocks. During a serious shortage,
   small silence blocks preserve the output device clock; the previous
   underrun crossfade and soft limiter remain.
-- Every 10 seconds the Android log reports the *game-produced* audio
+- Every 10 seconds the **exportable nightlane-native.log** and Android log report the *game-produced* audio
   frames/s, audio submitted frames/s, source-ring fill, output queue,
   AudioTrack underrun count and producer waiting count. The required output
   production for normal 48-kHz playback is 48000 stereo frames per second.
