@@ -31,12 +31,32 @@ class FastNativeRepackPolicy(unittest.TestCase):
         self.assertIn("-x :app:buildRust", workflow)
         self.assertNotIn("-PwithEngineCore=true", workflow)
         self.assertIn("tools/reuse_native_libraries.py", workflow)
-        self.assertIn("Nightlane-ARM64-RENDERER-LINK-FIX-0.1.12", workflow)
+        self.assertIn("Nightlane-ARM64-TOUCH-FPS-FIX-0.1.13", workflow)
         self.assertIn("cargo ndk -t arm64-v8a --platform 29", workflow)
         self.assertIn("Precompiled native game engine was modified", workflow)
         renderer = (ROOT / "src/renderer_only.rs").read_text()
         self.assertIn('pub extern "C" fn android_main(', renderer)
         self.assertIn('#[no_mangle]', renderer)
+
+    def test_native_only_touch_does_not_call_old_jni(self):
+        touch = (ROOT / "android/app/src/main/java/dev/muguet/TouchControls.java").read_text()
+        engine = (ROOT / "android/app/src/main/java/dev/muguet/EngineActivity.java").read_text()
+        old = (ROOT / "android/app/src/main/java/dev/muguet/GameActivity.java").read_text()
+        self.assertIn("interface LookSink", touch)
+        self.assertIn("lookSink.onLook(", touch)
+        self.assertIn("GameActivity::nativeLook", touch)
+        self.assertNotIn("GameActivity.nativeLook(", touch)
+        self.assertIn("accLookX + dx", engine)
+        self.assertIn("accLookY + dy", engine)
+        self.assertIn("nativeUpdatePad(keys.toArray", engine)
+        self.assertIn("new TouchControls(this,", old)
+
+    def test_native_surface_uses_reduced_internal_resolution(self):
+        engine = (ROOT / "android/app/src/main/java/dev/muguet/EngineActivity.java").read_text()
+        self.assertIn('surface.getHolder().setFixedSize(renderWidth, renderHeight);', engine)
+        self.assertIn('nightlane_native_render_scale', engine)
+        self.assertIn('int width = renderWidth', engine)
+        self.assertIn('int height = renderHeight', engine)
 
     def test_full_compile_not_auto_triggered(self):
         native = (ROOT / ".github/workflows/native-arm64-experiment.yml").read_text()

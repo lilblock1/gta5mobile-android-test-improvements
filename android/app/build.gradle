@@ -10,8 +10,8 @@ android {
         applicationId 'dev.muguet.test'
         minSdk 29
         targetSdk 36
-        versionCode 13
-        versionName '0.1.12-nightlane-renderer-link-fix'
+        versionCode 14
+        versionName '0.1.13-touch-bridge-render-scale'
         ndk { abiFilters 'arm64-v8a' }
     }
     compileOptions {

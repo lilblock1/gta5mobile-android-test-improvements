@@ -69,6 +69,10 @@ public final class EngineActivity extends Activity {
     private volatile boolean running, muted, surfaceReady, engineCoreLoaded;
     private boolean focused, controller, inCar;
     private int frameLimit = 30;
+    // Render the Vulkan surface at a reduced internal resolution and let
+    // SurfaceView scale it to the display. Touch HUD stays at device resolution.
+    private int renderWidth, renderHeight;
+    private float nativeRenderScale = 0.75f;
     private float lx, ly, rx, ry, lt, rt;
     private final HashSet<String> keyboardKeys = new HashSet<>();
     private final HashSet<Integer> padKeys = new HashSet<>();
@@ -108,6 +112,18 @@ public final class EngineActivity extends Activity {
 
         FrameLayout root = new FrameLayout(this);
         surface = new SurfaceView(this);
+        JSONObject surfaceConfig = readConfig();
+        double requestedScale = surfaceConfig.optDouble("nightlane_native_render_scale", 0.75);
+        nativeRenderScale = Double.isFinite(requestedScale)
+            ? (float) Math.max(0.50, Math.min(1.0, requestedScale)) : 0.75f;
+        int[] display = displaySize();
+        renderWidth = (Math.max(320, Math.round(display[0] * nativeRenderScale)) + 1) & ~1;
+        renderHeight = (Math.max(180, Math.round(display[1] * nativeRenderScale)) + 1) & ~1;
+        // Fixed-size SurfaceView still fills the screen, with Android scaling
+        // its smaller Vulkan buffer. A 75% scale roughly halves pixel work.
+        surface.getHolder().setFixedSize(renderWidth, renderHeight);
+        Log.i("NightlaneEngine", "Internal render surface: " + renderWidth + "x"
+            + renderHeight + " (" + Math.round(nativeRenderScale * 100) + "%)");
         surface.getHolder().addCallback(new SurfaceHolder.Callback() {
             @Override public void surfaceCreated(SurfaceHolder h) {
                 surfaceReady = true;
@@ -127,7 +143,14 @@ public final class EngineActivity extends Activity {
         root.addView(surface, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        controls = new TouchControls(this, LookSensitivity.fromConfig(new File(getFilesDir(), "config.json")));
+        controls = new TouchControls(this,
+            LookSensitivity.fromConfig(new File(getFilesDir(), "config.json")),
+            (dx, dy) -> {
+                // Native-only touch look is delivered by nativeUpdatePad, never
+                // GameActivity.nativeLook (old Wasmtime JNI).
+                accLookX = Math.max(-360f, Math.min(360f, accLookX + dx));
+                accLookY = Math.max(-360f, Math.min(360f, accLookY + dy));
+            });
         controls.setVisibility(View.VISIBLE);
         root.addView(controls, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -231,9 +254,10 @@ public final class EngineActivity extends Activity {
                 reportStartupFailure("Missing game manifest: " + manifest.getAbsolutePath());
                 return;
             }
-            int[] size = displaySize();
-            int width = Math.max(320, surface.getWidth() > 0 ? surface.getWidth() : size[0]);
-            int height = Math.max(180, surface.getHeight() > 0 ? surface.getHeight() : size[1]);
+            int width = renderWidth > 0 ? renderWidth : displaySize()[0];
+            int height = renderHeight > 0 ? renderHeight : displaySize()[1];
+            Log.i("NightlaneEngine", "Starting native engine at " + width + "x" + height
+                + " instead of full display resolution to reduce GPU load");
             nativeStartUptimeMs = android.os.SystemClock.elapsedRealtime();
             nativeStart(gameDir.getAbsolutePath(), manifest.getAbsolutePath(), startMode,
                         width, height, frameLimit);

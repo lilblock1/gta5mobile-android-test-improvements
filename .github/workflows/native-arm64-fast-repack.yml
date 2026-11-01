@@ -1,4 +1,4 @@
-name: Nightlane native-only fast launcher repack
+name: Nightlane native-only renderer and launcher test
 
 # Reuse the 500MB precompiled game engine. Rebuild only the tiny Rust Vulkan
 # renderer, resolving the previously missing android_main entry-point symbol.
@@ -143,7 +143,7 @@ jobs:
       - name: Publish native renderer linker fix APK
         uses: actions/upload-artifact@v5
         with:
-          name: Nightlane-ARM64-RENDERER-LINK-FIX-0.1.12
+          name: Nightlane-ARM64-TOUCH-FPS-FIX-0.1.13
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 7
@@ -151,5 +151,5 @@ jobs:
       - name: Summary
         run: |
           echo '### Launcher-only native APK repack' >> "$GITHUB_STEP_SUMMARY"
-          echo 'Reused 500MB native game engine unchanged; rebuilt only Vulkan renderer with android_main entrypoint fix.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Reused game engine unchanged; touch-look JNI routed to active EngineActivity, renderer retained, internal Vulkan resolution scaled to 75%.' >> "$GITHUB_STEP_SUMMARY"
           echo 'Experimental engine requires real-device testing.' >> "$GITHUB_STEP_SUMMARY"
