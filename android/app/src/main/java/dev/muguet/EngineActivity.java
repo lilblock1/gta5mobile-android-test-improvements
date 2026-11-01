@@ -528,14 +528,14 @@ public final class EngineActivity extends Activity {
                     long producedAt = nativeAudioProducedFrames() & 0xffffffffL;
                     long newFrames = (producedAt - oneSecondProduced) & 0xffffffffL;
                     long secondsElapsedMs = Math.max(1L, now - oneSecondAt);
-                    long rate = newFrames * 1000L / secondsElapsedMs;
+                    long producedFramesPerSecond = newFrames * 1000L / secondsElapsedMs;
                     // Ignore startup/prebuffering when no audio playback has
                     // begun. A low rate while running indicates a real mixer
                     // shortage rather than an Android AudioTrack write issue.
                     if (audioStarted) {
-                        worstSecondProducedFps = Math.min(worstSecondProducedFps, rate);
+                        worstSecondProducedFps = Math.min(worstSecondProducedFps, producedFramesPerSecond);
                         sourceSampleSeconds++;
-                        if (rate < 46000) sourceSlowSeconds++;
+                        if (producedFramesPerSecond < 46000) sourceSlowSeconds++;
                     }
                     oneSecondAt = now;
                     oneSecondProduced = producedAt;
