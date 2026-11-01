@@ -31,7 +31,12 @@ class FastNativeRepackPolicy(unittest.TestCase):
         self.assertIn("-x :app:buildRust", workflow)
         self.assertNotIn("-PwithEngineCore=true", workflow)
         self.assertIn("tools/reuse_native_libraries.py", workflow)
-        self.assertIn("Nightlane-ARM64-NATIVE-ONLY-DOWNLOAD-FIX", workflow)
+        self.assertIn("Nightlane-ARM64-RENDERER-LINK-FIX-0.1.12", workflow)
+        self.assertIn("cargo ndk -t arm64-v8a --platform 29", workflow)
+        self.assertIn("Precompiled native game engine was modified", workflow)
+        renderer = (ROOT / "src/renderer_only.rs").read_text()
+        self.assertIn('pub extern "C" fn android_main(', renderer)
+        self.assertIn('#[no_mangle]', renderer)
 
     def test_full_compile_not_auto_triggered(self):
         native = (ROOT / ".github/workflows/native-arm64-experiment.yml").read_text()

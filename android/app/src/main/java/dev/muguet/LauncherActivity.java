@@ -895,7 +895,10 @@ public final class LauncherActivity extends Activity {
         worker.execute(() -> {
             Exception thrown = null;
             try { System.loadLibrary("muguet"); }
-            catch (Throwable t) { thrown = new RuntimeException("The game library could not be loaded.", t); }
+            catch (Throwable t) {
+                android.util.Log.e("Nightlane", "Native renderer failed to load", t);
+                thrown = new IllegalStateException("Native renderer failed: " + t, t);
+            }
             if (thrown == null) nativeLoaded.set(true); else nativeFailure.compareAndSet(null, thrown);
             final Exception failure = thrown;
             runOnUiThread(() -> {
@@ -912,7 +915,7 @@ public final class LauncherActivity extends Activity {
             downloadGameButton.setEnabled(true);
             // The button itself explains the failure rather than silently ignoring taps.
             if (nativeFailure.get() != null) {
-                status.setText("Renderer initialization failed. Tap Play for details; downloading remains available.");
+                status.setText(nativeFailure.get().getMessage() + " — Tap Play for details. Downloads still work.");
                 return;
             }
             status.setText("Loading native renderer… Tap Play for progress.");

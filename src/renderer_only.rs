@@ -1,5 +1,14 @@
 // Native renderer-only crate: wasm2c C is the game engine; Rust is GPU + importer.
 // No Wasmtime runtime, Cranelift, or JIT is linked into this APK variant.
+// winit's Android-native-activity integration includes native_app_glue, which
+// references android_main even in our Java SurfaceView renderer. Native-only
+// builds do not use a NativeActivity, but the Android dynamic loader requires
+// the symbol to exist before it can dlopen libmuguet.so. This entrypoint is
+// deliberately never invoked in our SurfaceView-based activity.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn android_main(_app: *mut std::ffi::c_void) {}
+
 #[path = "gpu.rs"] mod gpu;
 #[path = "texture.rs"] mod texture;
 #[path = "frame_queue.rs"] mod frame_queue;
