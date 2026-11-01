@@ -69,7 +69,7 @@ jobs:
           CARGO_INCREMENTAL: '0'
           CARGO_PROFILE_RELEASE_DEBUG: '0'
         run: |
-          cargo ndk -t arm64-v8a --platform 29 -o android/app/src/main/jniLibs \\
+          cargo ndk -t arm64-v8a --platform 29 -o android/app/src/main/jniLibs \
             build --release --lib --no-default-features --features native-renderer
           python3 - <<'PY'
           import pathlib, re, subprocess, hashlib
