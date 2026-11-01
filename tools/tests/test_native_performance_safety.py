@@ -31,6 +31,7 @@ class NativePerformanceSafetyTest(unittest.TestCase):
         self.assertIn("self.mem.word(*flag).store(0, Ordering::SeqCst)", gpu)
         self.assertIn("if mapped && !self.lost.load(Ordering::SeqCst)", gpu)
         self.assertIn("self.readback_pool.len() < 4", gpu)
+        self.assertIn("NIGHTLANE_READBACK_REUSE", gpu)
         self.assertIn("buf.size() <= 8 * 1024 * 1024", gpu)
         self.assertIn("self.readback_pool.push(buf);", gpu)
         self.assertIn("fn frame_gap_percentiles_detect_outliers()", gpu)
