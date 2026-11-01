@@ -78,6 +78,8 @@ public final class EngineActivity extends Activity {
     // Audio playback continues independently of the 60 Hz UI/input pump;
     // game process startup may run well before the first onResume tick.
     private volatile boolean audioThreadRunning, audioPaused, audioStarted;
+    private long lastAudioWatchdogAtMs, lastAudioWatchdogProduced, lastAudioWatchdogCallbacks;
+    private long lastAudioWatchdogPlayback;
     private volatile boolean running, muted, surfaceReady, engineCoreLoaded;
     private boolean focused, controller, inCar;
     private int frameLimit = 30;
@@ -859,10 +861,60 @@ public final class EngineActivity extends Activity {
         return super.dispatchGenericMotionEvent(e);
     }
 
+    // Independently observes the native mixer and Android playback clock.
+    // Unlike the audio worker's 10-second report, this still runs when the
+    // audio worker is blocked inside a native call or a PCM write.
+    private void recordAudioWatchdog() {
+        long nowMs = android.os.SystemClock.elapsedRealtime();
+        if (lastAudioWatchdogAtMs != 0 && nowMs - lastAudioWatchdogAtMs < 5000) return;
+        try {
+            long ring = nativeAudioBufferState();
+            long produced = nativeAudioProducedFrames() & 0xffffffffL;
+            long callbacks = nativeAudioCallbackCount() & 0xffffffffL;
+            int available = NativeAudioBufferPolicy.boundedAvailable(ring);
+            int capacity = NativeAudioBufferPolicy.ringCapacity(ring);
+            AudioTrack track = audio;
+            Thread worker = audioThread;
+            long played = track == null ? -1L
+                : (track.getPlaybackHeadPosition() & 0xffffffffL);
+            long elapsed = lastAudioWatchdogAtMs == 0 ? 0 : nowMs - lastAudioWatchdogAtMs;
+            long producedDelta = elapsed == 0 ? -1
+                : (produced - lastAudioWatchdogProduced) & 0xffffffffL;
+            long callbacksDelta = elapsed == 0 ? -1
+                : (callbacks - lastAudioWatchdogCallbacks) & 0xffffffffL;
+            long playedDelta = elapsed == 0 || played < 0 || lastAudioWatchdogPlayback < 0 ? -1
+                : (played - lastAudioWatchdogPlayback) & 0xffffffffL;
+            String workerState = worker == null ? "null" : worker.getState().toString();
+            String stackTop = "";
+            if (worker != null && producedDelta == 0) {
+                StackTraceElement[] stack = worker.getStackTrace();
+                if (stack.length > 0) stackTop = " workerTop=" + stack[0].toString();
+            }
+            String message = "audio-watchdog: producer=" + produced
+                + " delta=" + producedDelta + "/" + elapsed + "ms"
+                + " copiedCallbacks=" + callbacks + " delta=" + callbacksDelta
+                + " ring=" + available + "/" + capacity
+                + " audioStarted=" + audioStarted + " paused=" + audioPaused
+                + " trackState=" + (track == null ? -1 : track.getPlayState())
+                + " headFrames=" + played + " headDelta=" + playedDelta
+                + " underruns=" + (track == null ? -1 : track.getUnderrunCount())
+                + " worker=" + workerState + stackTop;
+            Log.i("NightlaneAudio", message);
+            nativeAudioReport(message);
+            lastAudioWatchdogAtMs = nowMs;
+            lastAudioWatchdogProduced = produced;
+            lastAudioWatchdogCallbacks = callbacks;
+            lastAudioWatchdogPlayback = played;
+        } catch (Throwable error) {
+            Log.e("NightlaneAudio", "Audio watchdog failed", error);
+        }
+    }
+
     private void updateFps() {
         long now = System.nanoTime();
         // Do not call JNI or update TextView until a full second has elapsed.
         if (fpsAt != 0 && now - fpsAt < 1_000_000_000L) return;
+        recordAudioWatchdog();
         int thermalLevel = thermalStatus.level();
         nativeThermalLevel(thermalLevel);
         // Sample Android process PSS once every 10 seconds, not every frame.
