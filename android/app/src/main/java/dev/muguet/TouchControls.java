@@ -189,7 +189,8 @@ final class TouchControls extends View {
                 if (!inCar && Math.hypot(dx, dy) > 0.95) input.keys.add("ShiftLeft");
             } else if (g.button >= 0 && g.button < buttons.size()) {
                 String a = buttons.get(g.button).action;
-                if (a.equals("fire")) input.buttons |= 1;
+                if (a.equals("fire") || a.equals("gas")) input.buttons |= 1;
+                else if (a.equals("brake")) input.buttons |= 4;
                 else if (a.equals("horn")) input.horn = true;
                 else if (!a.equals("aim") && !a.equals("nav")) input.keys.add(a);
                 if (isWheel(g)) {
