@@ -535,14 +535,9 @@ static jint nativeAudio(JNIEnv *env, jobject thiz, jshortArray out, jint maxFram
   if (frames <= 0) return 0;
 
   uint32_t real = PGFillAudio(g_audioL, g_audioR, (uint32_t)frames);
-  // A short Java pull can consume the exact end of the mixer ring. Although
-  // PGFillAudio reports a full *requested* buffer, a subsequent empty pull
-  // would otherwise jump straight from the last sample to silence and click.
-  // Only taper genuinely small, fully drained pulls (not normal 1024-frame
-  // blocks); a concurrent refill means there is no known discontinuity.
-  const bool drainedShortBlock = real > 0 && real == (uint32_t)frames &&
-      frames <= 256 && PGAvailableAudioFrames(NULL) == 0;
-  const bool gap = real < (uint32_t)frames || drainedShortBlock;
+  // Only fade across actual mixer underruns. Marking every short, fully
+  // consumed chunk as a gap can repeatedly fade valid speech down to silence.
+  const bool gap = real < (uint32_t)frames;
   jshort *dst = (jshort *)(*env)->GetPrimitiveArrayCritical(env, out, NULL);
   if (!dst) return 0;
   for (jint i = 0; i < frames; i++) {
