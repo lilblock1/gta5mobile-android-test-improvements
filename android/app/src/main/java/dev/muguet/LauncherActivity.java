@@ -188,7 +188,7 @@ public final class LauncherActivity extends Activity {
     private Button play, playEngine, importButton, clearFolderButton, grantAccessButton, downloadGameButton;
     private TextView folderStatus;
     private ProgressBar progress;
-    private Spinner mode, heap, streamingBudget, worldstreamMode, msaaMode, frameQueue;
+    private Spinner mode, heap, streamingBudget, worldstreamMode, msaaMode, frameQueue, nativeCpuWorkers;
     private Spinner nightlanePresent, nightlaneSharpness, nightlaneLod, nightlaneHudSize, nightlaneHudOpacity;
     private CheckBox nightlaneThermal, nightlaneCompactHud, automaticHeap, readAhead, shadowFix;
     private static final double[] STREAMING_BUDGETS = {0.35, 0.25, 0.15};
@@ -447,6 +447,10 @@ public final class LauncherActivity extends Activity {
         column.addView(loadMagnetButton);
         mode = choice(column, "Start mode", new String[]{"Story", "Sandbox"}, settings.optInt("start_mode", 2) == 1 ? 0 : 1);
         heap = choice(column, "Maximum game heap (not total app memory)", new String[]{"3 GB", "4 GB", "5 GB", "6 GB", "7 GB", "8 GB"}, Math.max(0, Math.min(5, settings.optInt("android_heap_gb", 5) - 3)));
+        int workers = settings.optInt("native_cpu_workers", 2);
+        nativeCpuWorkers = choice(column, "Native engine CPU workers (benchmark 2 vs 4 vs 6)",
+            new String[]{"2 workers — baseline", "4 workers — experimental", "6 workers — experimental"},
+            workers >= 6 ? 2 : workers >= 4 ? 1 : 0);
         automaticHeap = check(column, "Reserve memory for Android and graphics (limit heap to physical RAM budget)",
             settings.optBoolean("android_auto_heap", true));
         readAhead = check(column, "Experimental storage read-ahead (may reduce streaming stalls; test on your phone)",
@@ -493,12 +497,13 @@ public final class LauncherActivity extends Activity {
         }
         restoreGraphics();
         loadingGraphics = false;
-        cpuBc = check(column, "Wasmtime diagnostic: decode BC textures on CPU (uses more memory)", settings.optBoolean("gpu_cpu_bc", false));
+        cpuBc = check(column, "Force CPU BC texture decoding (higher RAM use; diagnostics)", settings.optBoolean("gpu_cpu_bc", false));
         softwareClip = check(column, "Force software clip distances (Adreno turns this on by itself)", settings.optBoolean("gpu_software_clip", false));
-        scale = field(column, "Render scale (0.25–1.0)", Double.toString(settings.optDouble("scale", 0.5)));
+        scale = field(column, "Native render scale (0.50–1.0; lower may improve GPU FPS)",
+            Double.toString(settings.optDouble("nightlane_native_render_scale", 0.75)));
         scale.setInputType(android.text.InputType.TYPE_CLASS_NUMBER | android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL);
         String savedMsaa = settings.optString("android_msaa_mode", "default");
-        msaaMode = choice(column, "Wasmtime anti-aliasing (lower uses less GPU memory; edges may look rougher)",
+        msaaMode = choice(column, "Legacy anti-aliasing option (native engine currently uses automatic)",
             new String[]{"Up to 2x — current default", "Adaptive — 1x at low scale or on devices with 6 GB RAM or less", "1x — MSAA off"},
             "adaptive".equals(savedMsaa) ? 1 : "off".equals(savedMsaa) ? 2 : 0);
         String presentMode = settings.optString("nightlane_present", "native");
@@ -528,7 +533,7 @@ public final class LauncherActivity extends Activity {
             new String[]{"Subtle — 16%", "Normal — 24%", "High contrast — 36%"},
             savedHudOpacity >= 0.30 ? 2 : savedHudOpacity >= 0.20 ? 1 : 0);
         mute = check(column, "Mute audio", settings.optBoolean("mute", false));
-        multiplayer = check(column, "Multiplayer (Grand-V relay, not GTA Online)", settings.optBoolean("multiplayer", false));
+        multiplayer = check(column, "Legacy multiplayer setting (native engine offline-only)", settings.optBoolean("multiplayer", false));
         // The relay is run by whoever hosts the session; you need its address, the
         // room name and the access code that host typed. Same rules as the web
         // dialogs: rooms are 1-32 of letters/digits/_/-, codes are 4-128 printable
@@ -785,12 +790,16 @@ public final class LauncherActivity extends Activity {
         }
         try {
             double renderScale = Double.parseDouble(scale.getText().toString());
-            if (!Double.isFinite(renderScale) || renderScale < 0.25 || renderScale > 1) throw new IllegalArgumentException("Render scale must be between 0.25 and 1.0");
+            if (!Double.isFinite(renderScale) || renderScale < 0.50 || renderScale > 1) throw new IllegalArgumentException("Native render scale must be between 0.50 and 1.0");
             settings.put("scale", renderScale);
             settings.put("android_msaa_mode", new String[]{"default", "adaptive", "off"}[msaaMode.getSelectedItemPosition()]);
             settings.put("start_mode", mode.getSelectedItemPosition() + 1);
             settings.put("android_heap_gb", heap.getSelectedItemPosition() + 3);
             settings.put("android_auto_heap", automaticHeap.isChecked());
+            settings.put("native_cpu_workers", new int[]{2, 4, 6}[nativeCpuWorkers.getSelectedItemPosition()]);
+            // On the native backend this controls SurfaceView's internal Vulkan
+            // buffer size, not the old Wasmtime-specific offscreen resolution.
+            settings.put("nightlane_native_render_scale", Math.max(0.50, renderScale));
             settings.put("nightlane_read_ahead", readAhead.isChecked());
             settings.put("nightlane_shadow_fix", shadowFix.isChecked());
             settings.put("nightlane_frame_queue", new String[]{"original", "low_latency", "minimal"}[frameQueue.getSelectedItemPosition()]);

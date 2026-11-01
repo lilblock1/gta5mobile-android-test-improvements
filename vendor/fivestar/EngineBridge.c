@@ -195,6 +195,90 @@ static jboolean nativeCacheActivity(JNIEnv *env, jclass clazz, jobject activity)
 // Start the engine. gameDir is the installed game folder (contains data/ and b/).
 // Runs on its own thread inside the core, so this returns once boot is kicked off;
 // progress arrives through onEngineStatus.
+// Persistent only within this isolated :engine process; configured once before
+// boot, never on a running game's threads.
+static char qualityValues[32][96];
+static const char *qualityPointers[32];
+static unsigned qualityCount;
+static const char *const approvedQuality[] = {
+  "-shaderQuality", "-textureQuality", "-pedVariety", "-vehicleVariety",
+  "-shadowQuality", "-reflectionQuality", "-particleQuality", "-grassQuality",
+  "-cityDensity", "-lodScale", "-pedLodBias", "-vehicleLodBias",
+  "-waterQuality", "-anisotropicQualityLevel", "-postFX", "-MotionBlurStrength",
+  "-noInGameDOF", "-shadowSoftness", "-SSAO", "-farclip", "-fogVolumes",
+  "-particleShadows", "-shadowLongShadows", "-HDStreamingInFlight", "-nolodlights"
+};
+static const char *const approvedRendererEnv[] = {
+  "NIGHTLANE_FRAME_QUEUE", "NIGHTLANE_SHADOW_FIX", "NIGHTLANE_PRESENT",
+  "NIGHTLANE_SHARPNESS", "NIGHTLANE_THERMAL_ADAPTIVE",
+  "MUGUET_GPU_SOFTWARE_CLIP", "MUGUET_GPU_CPU_BC", "MUGUET_RENDER_FPS_LIMIT"
+};
+static void nativeConfigure(JNIEnv *env, jclass clazz, jobjectArray options,
+                            jint workers, jfloat streamerBudget, jobjectArray rendererVars) {
+  (void)clazz;
+  qualityCount = 0;
+  if (options) {
+    jsize count = (*env)->GetArrayLength(env, options);
+    for (jsize i = 0; i < count && qualityCount < 32; ++i) {
+      jstring item = (jstring)(*env)->GetObjectArrayElement(env, options, i);
+      if (!item) continue;
+      const char *value = (*env)->GetStringUTFChars(env, item, NULL);
+      if (value && strlen(value) < sizeof qualityValues[0]) {
+        const char *equal = strchr(value, '=');
+        if (equal && equal > value && equal[1]) {
+          size_t keyLen = (size_t)(equal - value);
+          bool approved = false;
+          for (unsigned j = 0; j < sizeof approvedQuality / sizeof approvedQuality[0]; ++j)
+            if (strlen(approvedQuality[j]) == keyLen &&
+                !strncmp(value, approvedQuality[j], keyLen)) approved = true;
+          if (approved) {
+            snprintf(qualityValues[qualityCount], sizeof qualityValues[0], "%s", value);
+            qualityPointers[qualityCount] = qualityValues[qualityCount];
+            ++qualityCount;
+          }
+        }
+      }
+      if (value) (*env)->ReleaseStringUTFChars(env, item, value);
+      (*env)->DeleteLocalRef(env, item);
+    }
+  }
+  char digits[16];
+  snprintf(digits, sizeof digits, "%d", workers >= 1 && workers <= 8 ? workers : 2);
+  setenv("PG_ENGINE_CORES", digits, 1);
+  if (isfinite(streamerBudget) && streamerBudget >= 0.1f && streamerBudget <= 0.95f) {
+    snprintf(digits, sizeof digits, "%.3f", streamerBudget);
+    setenv("PG_STREAMER_PERCENTAGE", digits, 1);
+  }
+  if (rendererVars) {
+    jsize count = (*env)->GetArrayLength(env, rendererVars);
+    for (jsize i = 0; i < count && i < 32; ++i) {
+      jstring item = (jstring)(*env)->GetObjectArrayElement(env, rendererVars, i);
+      if (!item) continue;
+      const char *value = (*env)->GetStringUTFChars(env, item, NULL);
+      if (value && strlen(value) < 128) {
+        const char *equal = strchr(value, '=');
+        if (equal && equal[1] && !strpbrk(equal + 1, "\\r\\n")) {
+          size_t keyLen = (size_t)(equal - value);
+          for (unsigned j = 0; j < sizeof approvedRendererEnv / sizeof approvedRendererEnv[0]; ++j) {
+            if (strlen(approvedRendererEnv[j]) == keyLen &&
+                !strncmp(value, approvedRendererEnv[j], keyLen)) {
+              char key[48];
+              memcpy(key, value, keyLen);
+              key[keyLen] = 0;
+              setenv(key, equal + 1, 1);
+              break;
+            }
+          }
+        }
+      }
+      if (value) (*env)->ReleaseStringUTFChars(env, item, value);
+      (*env)->DeleteLocalRef(env, item);
+    }
+  }
+  LOGI("Native options: %u graphics flags, %u workers, streamer=%.3f",
+       qualityCount, workers >= 1 && workers <= 8 ? (unsigned)workers : 2, streamerBudget);
+}
+
 static void nativeStart(JNIEnv *env, jobject thiz, jstring gameDir, jstring manifestPath,
                         jint startMode, jint width, jint height, jint frameLimit) {
   (void)thiz;
@@ -207,8 +291,11 @@ static void nativeStart(JNIEnv *env, jobject thiz, jstring gameDir, jstring mani
   // before PGStartEngine's boot thread reads it.
   PGSetStartMode(startMode);
   PGSetBackBufferSize(width, height);
-  const char *quality[1] = { NULL };
-  PGConfigureEngine(quality, 0, width, height, frameLimit);
+  // Map requested FPS to the game's actual internal VSYNC mode (0,1,2).
+  // Passing literal 24/30/42/60 was ignored by PGConfigureEngine.
+  const int nativeFrameMode = frameLimit <= 0 ? 0 : frameLimit <= 30 ? 2 : 1;
+  PGConfigureEngine(qualityPointers, qualityCount, width, height, nativeFrameMode);
+  LOGI("Native frame mapping: requested=%d fps, internal mode=%d", frameLimit, nativeFrameMode);
 
   LOGI("Starting engine in %s (manifest %s)", dir, manifest);
 
@@ -455,6 +542,7 @@ static JNINativeMethod g_methods[] = {
   {"nativeCacheActivity",     "(Ljava/lang/Object;)Z",               (void*)nativeCacheActivity},
   {"nativeSetHeapMb",         "(I)V",                                 (void*)nativeSetHeapMb},
   {"nativeSetLogPath",        "(Ljava/lang/String;)V",                (void*)nativeSetLogPath},
+  {"nativeConfigure",         "([Ljava/lang/String;IF[Ljava/lang/String;)V", (void*)nativeConfigure},
   {"nativeStart",             "(Ljava/lang/String;Ljava/lang/String;IIII)V", (void*)nativeStart},
   {"nativeAttachSurface",     "(Landroid/view/Surface;)V",            (void*)nativeAttachSurface},
   {"nativeUpdatePad",         "([Ljava/lang/String;IZFFZ)V",          (void*)nativeUpdatePad},

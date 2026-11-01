@@ -44,6 +44,10 @@ public final class EngineActivity extends Activity {
     private static native boolean nativeCacheActivity(Object activity);
     private static native void nativeSetHeapMb(int mb);
     private static native void nativeSetLogPath(String path);
+    // Native-only startup: apply the launcher preferences to the C engine and
+    // Rust Vulkan renderer before either starts its worker threads.
+    private static native void nativeConfigure(String[] graphics, int cpuWorkers,
+                                                float streamerBudget, String[] rendererVars);
     private static native void nativeStart(String gameDir, String manifestPath, int startMode,
                                            int width, int height, int frameLimit);
     private static native void nativeAttachSurface(android.view.Surface surface);
@@ -235,7 +239,7 @@ public final class EngineActivity extends Activity {
             nativeSetLogPath(new File(getFilesDir(), "nightlane-native.log").getAbsolutePath());
             JSONObject config = readConfig();
             muted = config.optBoolean("mute", false);
-            frameLimit = config.optInt("fps_limit", 30) <= 30 ? 30 : 60;
+            frameLimit = nativeTargetFps(config);
             int startMode = config.optInt("start_mode", 2);
             // EngineHost reads PG_ENGINE_HEAP_MB before boot; set it from the
             // chosen ceiling and optional physical-RAM budget. This does not
@@ -258,6 +262,13 @@ public final class EngineActivity extends Activity {
             int height = renderHeight > 0 ? renderHeight : displaySize()[1];
             Log.i("NightlaneEngine", "Starting native engine at " + width + "x" + height
                 + " instead of full display resolution to reduce GPU load");
+            // The old Wasmtime startup used to apply these arguments in Rust.
+            // Native-only launches must explicitly forward them over JNI.
+            nativeConfigure(nativeGraphicsArgs(config),
+                Math.max(1, Math.min(8, config.optInt("native_cpu_workers", 2))),
+                (float) config.optDouble("streamer_percentage", 0.35),
+                nativeRendererOptions(config, frameLimit));
+            Log.i("NightlaneEngine", "Native graphics preferences applied; requested FPS " + frameLimit);
             nativeStartUptimeMs = android.os.SystemClock.elapsedRealtime();
             nativeStart(gameDir.getAbsolutePath(), manifest.getAbsolutePath(), startMode,
                         width, height, frameLimit);
@@ -295,6 +306,82 @@ public final class EngineActivity extends Activity {
         try { return new JSONObject(new String(Files.readAllBytes(
                 new File(getFilesDir(), "config.json").toPath()), StandardCharsets.UTF_8)); }
         catch (Exception ignored) { return new JSONObject(); }
+    }
+
+    // Keep this list synchronized with the low phone defaults in EngineHost.c.
+    // Append only allowlisted overrides, never arbitrary engine command strings.
+    private static String[] nativeGraphicsArgs(JSONObject cfg) {
+        java.util.LinkedHashMap<String, String> args = new java.util.LinkedHashMap<>();
+        for (String entry : new String[] {
+            "-shaderQuality=1", "-textureQuality=0", "-pedVariety=0",
+            "-vehicleVariety=0", "-shadowQuality=-1", "-reflectionQuality=0",
+            "-particleQuality=0", "-grassQuality=0", "-cityDensity=0",
+            "-lodScale=0", "-pedLodBias=0", "-vehicleLodBias=0"
+        }) {
+            int equal = entry.indexOf('=');
+            args.put(entry.substring(0, equal), entry);
+        }
+        final String allowed = "|-shaderQuality|-textureQuality|-pedVariety|-vehicleVariety"
+            + "|-shadowQuality|-reflectionQuality|-particleQuality|-grassQuality"
+            + "|-cityDensity|-lodScale|-pedLodBias|-vehicleLodBias|-waterQuality"
+            + "|-anisotropicQualityLevel|-postFX|-MotionBlurStrength|-noInGameDOF"
+            + "|-shadowSoftness|-SSAO|-farclip|-fogVolumes|-particleShadows"
+            + "|-shadowLongShadows|-HDStreamingInFlight|-nolodlights";
+        org.json.JSONArray overrides = cfg.optJSONArray("extra_args");
+        if (overrides != null) for (int i = 0; i < overrides.length(); i++) {
+            String argument = overrides.optString(i, "");
+            int equal = argument.indexOf('=');
+            if (equal < 1 || argument.length() > 90) continue;
+            String name = argument.substring(0, equal);
+            String value = argument.substring(equal + 1);
+            if (!(allowed + "|").contains("|" + name + "|")) continue;
+            if (!value.matches("[a-zA-Z0-9.+-]{1,20}")) continue;
+            args.put(name, argument);
+        }
+        return args.values().toArray(new String[0]);
+    }
+
+    // GTA's -frameLimit takes an internal 0/1/2 VSYNC mode, not literal FPS.
+    // The C bridge selects that mode; the renderer can also pace at 24/30/42.
+    private static int nativeTargetFps(JSONObject cfg) {
+        int value = cfg.optInt("fps_limit", 30);
+        org.json.JSONArray args = cfg.optJSONArray("extra_args");
+        if (args != null) for (int i = 0; i < args.length(); i++) {
+            String s = args.optString(i, "");
+            if (!s.startsWith("-frameLimit=")) continue;
+            try {
+                int parsed = Integer.parseInt(s.substring("-frameLimit=".length()));
+                if (parsed == 24 || parsed == 30 || parsed == 42 || parsed == 60)
+                    value = parsed;
+            } catch (NumberFormatException ignored) {}
+        }
+        return value <= 0 ? 0 : Math.max(24, Math.min(60, value));
+    }
+
+    private static String[] nativeRendererOptions(JSONObject cfg, int fps) {
+        java.util.ArrayList<String> vars = new java.util.ArrayList<>();
+        String queue = cfg.optString("nightlane_frame_queue", "low_latency");
+        if (!queue.equals("minimal") && !queue.equals("original")) queue = "low_latency";
+        vars.add("NIGHTLANE_FRAME_QUEUE=" + queue);
+        vars.add("NIGHTLANE_SHADOW_FIX=" + (cfg.optBoolean("nightlane_shadow_fix", true) ? "1" : "0"));
+        String mode = cfg.optString("nightlane_present", "native");
+        if (!mode.equals("smooth") && !mode.equals("sharp")) mode = "native";
+        vars.add("NIGHTLANE_PRESENT=" + mode);
+        double sharpness = cfg.optDouble("nightlane_sharpness", 0.3);
+        if (!Double.isFinite(sharpness)) sharpness = 0.3;
+        vars.add("NIGHTLANE_SHARPNESS=" + String.format(java.util.Locale.US, "%.3f",
+            Math.max(0.0, Math.min(0.5, sharpness))));
+        vars.add("NIGHTLANE_THERMAL_ADAPTIVE="
+            + (cfg.optBoolean("nightlane_thermal_adaptive", true) ? "1" : "0"));
+        if (cfg.optBoolean("gpu_software_clip", false))
+            vars.add("MUGUET_GPU_SOFTWARE_CLIP=1");
+        if (cfg.optBoolean("gpu_cpu_bc", false))
+            vars.add("MUGUET_GPU_CPU_BC=1");
+        // A literal 30/42/24 FPS target must be implemented by frame pacing
+        // rather than passing those integers to the game's internal frame mode.
+        if (fps > 0 && fps < 60)
+            vars.add("MUGUET_RENDER_FPS_LIMIT=" + fps);
+        return vars.toArray(new String[0]);
     }
 
     // Called from the native engine thread via the log bridge. Never touch views
