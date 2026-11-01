@@ -29,6 +29,9 @@ stutter when the engine, renderer or storage falls behind.
 - Routine engine graphics and streaming log lines stay in the native log
   but do not pass through the JNI activity status callback, avoiding
   unnecessary UI-thread wakeups during cutscenes.
+- Vulkan pipeline-cache serialization now waits for **8 seconds without new
+  shader requests** and no outstanding compiler jobs, reducing the chance
+  of driver cache extraction competing with busy cutscene rendering.
 
 ## What this does NOT fix automatically
 
