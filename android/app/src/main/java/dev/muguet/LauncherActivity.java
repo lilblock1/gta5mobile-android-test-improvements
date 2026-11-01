@@ -190,7 +190,7 @@ public final class LauncherActivity extends Activity {
     private ProgressBar progress;
     private Spinner mode, heap, streamingBudget, worldstreamMode, msaaMode, frameQueue, nativeCpuWorkers, pipelineWorkers;
     private Spinner nightlanePresent, nightlaneSharpness, nightlaneLod, nightlaneHudSize, nightlaneHudOpacity;
-    private CheckBox nightlaneThermal, nightlaneCompactHud, touchFreeAim, automaticHeap, readAhead, shadowFix;
+    private CheckBox nightlaneThermal, nightlaneCompactHud, touchFreeAim, automaticHeap, readAhead, readbackReuse, shadowFix;
     private static final double[] STREAMING_BUDGETS = {0.35, 0.25, 0.15};
     private EditText scale, name, magnetField, relayUrl, relayRoom, relayKey;
     private CheckBox mute, multiplayer, cpuBc, softwareClip;
@@ -459,6 +459,8 @@ public final class LauncherActivity extends Activity {
             settings.optBoolean("android_auto_heap", true));
         readAhead = check(column, "Experimental storage read-ahead (may reduce streaming stalls; test on your phone)",
             settings.optBoolean("nightlane_read_ahead", true));
+        readbackReuse = check(column, "Reuse completed Vulkan readback buffers (experimental; safe off switch)",
+            settings.optBoolean("nightlane_readback_reuse", true));
         String queueMode = settings.optString("nightlane_frame_queue", "low_latency");
         frameQueue = choice(column, "Frame queue (restart game to apply)",
             new String[]{"Original — 3 frames", "Lower latency — 2 frames", "Minimum latency — 1 frame (may reduce FPS)"},
@@ -809,6 +811,7 @@ public final class LauncherActivity extends Activity {
             // buffer size, not the old Wasmtime-specific offscreen resolution.
             settings.put("nightlane_native_render_scale", Math.max(0.50, renderScale));
             settings.put("nightlane_read_ahead", readAhead.isChecked());
+            settings.put("nightlane_readback_reuse", readbackReuse.isChecked());
             settings.put("nightlane_shadow_fix", shadowFix.isChecked());
             settings.put("nightlane_frame_queue", new String[]{"original", "low_latency", "minimal"}[frameQueue.getSelectedItemPosition()]);
             settings.put("streamer_percentage", STREAMING_BUDGETS[streamingBudget.getSelectedItemPosition()]);
