@@ -59,6 +59,7 @@ public final class EngineActivity extends Activity {
     private static native int nativeAudio(short[] out, int maxFrames);
     private static native long nativeAudioBufferState();
     private static native long nativeAudioProducedFrames();
+    private static native void nativeAudioReport(String message);
     private static native boolean nativePauseMenuActive();
     private static native int nativeLastInputDevice();
     private static native int nativeTouchContext();
@@ -601,14 +602,19 @@ public final class EngineActivity extends Activity {
                     long produced = nativeAudioProducedFrames() & 0xffffffffL;
                     long newFrames = (produced - lastProduced) & 0xffffffffL;
                     double elapsed = Math.max(0.001, (now - lastReport) / 1000.0);
-                    Log.i("NightlaneAudio", "gameProducedFps=" + Math.round(newFrames / elapsed)
+                    String report = "gameProducedFps=" + Math.round(newFrames / elapsed)
                         + " outputSubmittedFps=" + Math.round((writtenFrames - lastWrittenFrames) / elapsed)
                         + " ringAvailable=" + available + "/" + capacity
                         + " outputQueued=" + queued + " peakQueue=" + peakQueue
                         + " AndroidUnderruns=" + track.getUnderrunCount()
                         + " shortWrites=" + shortWrites + " emptyReads=" + emptyReads
                         + " producerWaits=" + waitingCycles
-                        + " (needs 48000 game samples/s)");
+                        + " (needs 48000 stereo frames/s)";
+                    Log.i("NightlaneAudio", report);
+                    try { nativeAudioReport(report); }
+                    catch (Throwable loggingError) {
+                        Log.w("NightlaneAudio", "Could not save audio telemetry", loggingError);
+                    }
                     lastReport = now;
                     lastProduced = produced;
                     lastWrittenFrames = writtenFrames;
