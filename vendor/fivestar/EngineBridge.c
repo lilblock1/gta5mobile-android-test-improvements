@@ -211,7 +211,7 @@ static const char *const approvedQuality[] = {
 static const char *const approvedRendererEnv[] = {
   "NIGHTLANE_FRAME_QUEUE", "NIGHTLANE_SHADOW_FIX", "NIGHTLANE_PRESENT",
   "NIGHTLANE_SHARPNESS", "NIGHTLANE_THERMAL_ADAPTIVE",
-  "MUGUET_GPU_SOFTWARE_CLIP", "MUGUET_GPU_CPU_BC", "MUGUET_RENDER_FPS_LIMIT"
+  "NIGHTLANE_PIPELINE_WORKERS", "MUGUET_GPU_SOFTWARE_CLIP", "MUGUET_GPU_CPU_BC", "MUGUET_RENDER_FPS_LIMIT"
 };
 static void nativeConfigure(JNIEnv *env, jclass clazz, jobjectArray options,
                             jint workers, jfloat streamerBudget, jobjectArray rendererVars) {
@@ -257,7 +257,7 @@ static void nativeConfigure(JNIEnv *env, jclass clazz, jobjectArray options,
       const char *value = (*env)->GetStringUTFChars(env, item, NULL);
       if (value && strlen(value) < 128) {
         const char *equal = strchr(value, '=');
-        if (equal && equal[1] && !strpbrk(equal + 1, "\\r\\n")) {
+        if (equal && equal[1] && !strpbrk(equal + 1, "\r\n")) {
           size_t keyLen = (size_t)(equal - value);
           for (unsigned j = 0; j < sizeof approvedRendererEnv / sizeof approvedRendererEnv[0]; ++j) {
             if (strlen(approvedRendererEnv[j]) == keyLen &&

@@ -76,7 +76,14 @@ target_include_directories(gta5engine PRIVATE
   ${REPO_ROOT}/app/Tools/bcdec
 )
 
+# Gradle's assembleDebug configures CMake Debug (-O0), even when we use a
+# release-style Rust renderer. A 256-translation-unit wasm2c engine at -O0
+# performs poorly on ARM64. Put explicit optimization options after CMake's
+# defaults. -O1 for huge machine-generated game C limits compiler RAM/time;
+# -O2 for the much smaller handwritten host, renderer seam, and JNI.
+# Preserve precise trap, FP and unwind choices made below.
 target_compile_options(gta5engine PRIVATE
+  -O2
   -Wno-deprecated-declarations
   -frounding-math
   -fno-optimize-sibling-calls
@@ -89,7 +96,7 @@ target_compile_options(gta5engine PRIVATE
 # warning per memory access (wasm_rt_shared_memory_t* vs wasm_rt_memory_t*),
 # which is thousands of lines of log per build. Silence them there only, so the
 # hand-written host sources below vendor/ keep reporting theirs.
-set_source_files_properties(${GAME_CODE_SOURCES} PROPERTIES COMPILE_OPTIONS "-w")
+set_source_files_properties(${GAME_CODE_SOURCES} PROPERTIES COMPILE_OPTIONS "-w;-O1")
 target_compile_definitions(gta5engine PRIVATE
   # -std=c11 defines __STRICT_ANSI__, which hides the POSIX/GNU declarations this
   # code relies on: bionic's <execinfo.h> withholds backtrace() without it, and

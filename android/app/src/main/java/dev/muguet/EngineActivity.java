@@ -373,6 +373,9 @@ public final class EngineActivity extends Activity {
             Math.max(0.0, Math.min(0.5, sharpness))));
         vars.add("NIGHTLANE_THERMAL_ADAPTIVE="
             + (cfg.optBoolean("nightlane_thermal_adaptive", true) ? "1" : "0"));
+        int pipelines = cfg.optInt("nightlane_pipeline_workers", 2);
+        vars.add("NIGHTLANE_PIPELINE_WORKERS=" +
+            (pipelines == 1 || pipelines == 4 ? pipelines : 2));
         if (cfg.optBoolean("gpu_software_clip", false))
             vars.add("MUGUET_GPU_SOFTWARE_CLIP=1");
         if (cfg.optBoolean("gpu_cpu_bc", false))

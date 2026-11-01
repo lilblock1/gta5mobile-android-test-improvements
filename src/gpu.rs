@@ -1462,7 +1462,14 @@ impl Gpu {
         let pipe_jobs = {
             let (job_tx, job_rx) = std::sync::mpsc::channel::<(u64, PipeJob)>();
             let job_rx = Arc::new(Mutex::new(job_rx));
-            for i in 0..4 {
+            // Four shader compiler workers can starve the two default guest
+            // workers on mobile. Default to two, then measure before tuning.
+            let compiler_workers = std::env::var("NIGHTLANE_PIPELINE_WORKERS").ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .filter(|&count| (1..=4).contains(&count))
+                .unwrap_or(if cfg!(target_os = "android") { 2 } else { 4 });
+            log(&format!("shader pipeline workers: {compiler_workers}"));
+            for i in 0..compiler_workers {
                 let (dev, lost, rx, tx) = (device.clone(), lost.clone(), job_rx.clone(), res_tx.clone());
                 std::thread::Builder::new().name(format!("pipeline-compile-{i}")).spawn(move || loop {
                     let job = rx.lock().unwrap().recv();

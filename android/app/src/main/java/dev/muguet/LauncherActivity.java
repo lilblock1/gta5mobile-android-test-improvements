@@ -188,7 +188,7 @@ public final class LauncherActivity extends Activity {
     private Button play, playEngine, importButton, clearFolderButton, grantAccessButton, downloadGameButton;
     private TextView folderStatus;
     private ProgressBar progress;
-    private Spinner mode, heap, streamingBudget, worldstreamMode, msaaMode, frameQueue, nativeCpuWorkers;
+    private Spinner mode, heap, streamingBudget, worldstreamMode, msaaMode, frameQueue, nativeCpuWorkers, pipelineWorkers;
     private Spinner nightlanePresent, nightlaneSharpness, nightlaneLod, nightlaneHudSize, nightlaneHudOpacity;
     private CheckBox nightlaneThermal, nightlaneCompactHud, automaticHeap, readAhead, shadowFix;
     private static final double[] STREAMING_BUDGETS = {0.35, 0.25, 0.15};
@@ -451,6 +451,10 @@ public final class LauncherActivity extends Activity {
         nativeCpuWorkers = choice(column, "Native engine CPU workers (benchmark 2 vs 4 vs 6)",
             new String[]{"2 workers — baseline", "4 workers — experimental", "6 workers — experimental"},
             workers >= 6 ? 2 : workers >= 4 ? 1 : 0);
+        int shaderWorkers = settings.optInt("nightlane_pipeline_workers", 2);
+        pipelineWorkers = choice(column, "Vulkan shader compiler workers (lower CPU contention)",
+            new String[]{"1 worker", "2 workers — mobile default", "4 workers — fast initial compilation"},
+            shaderWorkers >= 4 ? 2 : shaderWorkers <= 1 ? 0 : 1);
         automaticHeap = check(column, "Reserve memory for Android and graphics (limit heap to physical RAM budget)",
             settings.optBoolean("android_auto_heap", true));
         readAhead = check(column, "Experimental storage read-ahead (may reduce streaming stalls; test on your phone)",
@@ -797,6 +801,8 @@ public final class LauncherActivity extends Activity {
             settings.put("android_heap_gb", heap.getSelectedItemPosition() + 3);
             settings.put("android_auto_heap", automaticHeap.isChecked());
             settings.put("native_cpu_workers", new int[]{2, 4, 6}[nativeCpuWorkers.getSelectedItemPosition()]);
+            settings.put("nightlane_pipeline_workers",
+                new int[]{1, 2, 4}[pipelineWorkers.getSelectedItemPosition()]);
             // On the native backend this controls SurfaceView's internal Vulkan
             // buffer size, not the old Wasmtime-specific offscreen resolution.
             settings.put("nightlane_native_render_scale", Math.max(0.50, renderScale));
