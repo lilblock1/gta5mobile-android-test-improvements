@@ -1194,6 +1194,7 @@ struct PendingMap {
     // and must not be unmapped, particularly after the device destroys it.
     status: Arc<AtomicI32>,
     kind: MapKind,
+    started: Instant,
 }
 enum MapKind {
     Readback { flag: u64, rows: Vec<(u64, u64, u64)> },
@@ -1223,6 +1224,16 @@ pub struct Gpu {
     restored_buffers: u64,
     eviction_last_scan_frame: u64,
     eviction_pending: VecDeque<u32>,
+    eviction_scan_count: u64,
+    eviction_scan_max_ns: u64,
+    // Reuse only fully unmapped readback buffers. The pool is intentionally
+    // small: no outstanding GPU copy, mapping or engine wait may reference it.
+    readback_pool: Vec<Buffer>,
+    readback_pool_hits: u64,
+    readback_pool_misses: u64,
+    readback_completions: u64,
+    readback_max_wait_ns: u64,
+    readback_slow_50ms: u64,
     hud_last_sample: Instant,
     // Android-only low-CPU frame pacing for launcher FPS values (24/30/42).
     frame_pace: Option<Duration>,
@@ -1490,7 +1501,10 @@ impl Gpu {
             resource_replacements: 0, live_gpu_buffer_bytes: 0, live_gpu_buffer_count: 0,
             deferred_buffer_allocations: 0, restore_data_bytes: 0,
             evicted_buffers: 0, restored_buffers: 0, eviction_last_scan_frame: 0,
-            eviction_pending: VecDeque::new(), hud_last_sample: Instant::now(),
+            eviction_pending: VecDeque::new(), eviction_scan_count: 0, eviction_scan_max_ns: 0,
+            readback_pool: Vec::new(), readback_pool_hits: 0, readback_pool_misses: 0,
+            readback_completions: 0, readback_max_wait_ns: 0, readback_slow_50ms: 0,
+            hud_last_sample: Instant::now(),
             frame_pace, frame_due: None,
             thermal_adaptive: cfg!(target_os = "android")
                 && std::env::var("NIGHTLANE_THERMAL_ADAPTIVE").unwrap_or_default() != "0",
@@ -1672,6 +1686,7 @@ impl Gpu {
             && self.presents.saturating_sub(self.eviction_last_scan_frame) >= scan_interval
         {
             self.eviction_last_scan_frame = self.presents;
+            let scan_started = Instant::now();
             let mut candidates: Vec<(u64, u32)> = self.objs.iter().enumerate().filter_map(|(index, obj)| {
                 let Obj::Buf(b) = obj.as_ref()? else { return None; };
                 if b.gpu.is_none()
@@ -1680,11 +1695,15 @@ impl Gpu {
                 { return None; }
                 Some((b.last_used_frame.unwrap_or(b.born_frame), index as u32))
             }).collect();
-            candidates.sort_unstable();
+            // Find the oldest 15k without fully sorting all live engine IDs.
+            // Restricting the scan only changes CPU work, not eviction safety.
+            oldest_candidates(&mut candidates, GPU_BUFFER_SWEEP_GOAL);
             for (_, id) in candidates {
-                if self.eviction_pending.len() >= GPU_BUFFER_SWEEP_GOAL { break; }
                 if !self.is_bound(id) && !self.used(id) { self.eviction_pending.push_back(id); }
             }
+            self.eviction_scan_count += 1;
+            self.eviction_scan_max_ns = self.eviction_scan_max_ns.max(
+                scan_started.elapsed().as_nanos().min(u64::MAX as u128) as u64);
             log(&format!(
                 "gpu eviction: {} physical buffers (soft limit {}), queued {} oldest recoverable buffers (target {}), Android trim level {}; never evict unbacked guest data",
                 self.live_gpu_buffer_count, GPU_BUFFER_SOFT_LIMIT, self.eviction_pending.len(), GPU_BUFFER_SWEEP_GOAL, pressure
@@ -3876,6 +3895,25 @@ impl Gpu {
         self.mark_color_dirty(res);
     }
 
+    // A completed map has no outstanding GPU work, so its unmapped staging
+    // allocation can safely serve another transfer. At most 4 buffers/8 MiB
+    // remain resident; oversized and failed mappings are never cached.
+    fn acquire_readback_buffer(&mut self, requested: u64) -> Buffer {
+        let size = requested.max(4);
+        if let Some(index) = self.readback_pool.iter().position(|b| {
+            b.size() >= size && b.size() <= size.saturating_mul(2)
+        }) {
+            self.readback_pool_hits += 1;
+            return self.readback_pool.swap_remove(index);
+        }
+        self.readback_pool_misses += 1;
+        self.device.create_buffer(&BufferDescriptor {
+            label: Some("readback"), size,
+            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        })
+    }
+
     fn readback(&mut self, p: u64) {
         let mb = self.base;
         let u = move |w: u64| unsafe { std::ptr::read_volatile(mb.add(((p + w) * 4) as usize) as *const u32) };
@@ -3893,7 +3931,7 @@ impl Gpu {
             let Some((g, bsize)) = backed.and_then(|g| self.buf(src).map(|bo| (g, bo.size))) else { done(self); return };
             let n = if has_box { (r - l) as u64 } else { size.min(bsize) };
             let padded = ((n + 3) & !3).max(4);
-            let rb = self.device.create_buffer(&BufferDescriptor { label: Some("readback"), size: padded, usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ, mapped_at_creation: false });
+            let rb = self.acquire_readback_buffer(padded);
             self.end_pass();
             let from = if has_box { l as u64 } else { 0 };
             let copy = padded.min(g.size().saturating_sub(from)) & !3;
@@ -3916,7 +3954,7 @@ impl Gpu {
         let row_bytes = (bx * bytes) as u64;
         let bpr = row_bytes.div_ceil(256) * 256;
         let rb_size = bpr * by as u64 * d as u64;
-        let rb = self.device.create_buffer(&BufferDescriptor { label: Some("readback"), size: rb_size.max(4), usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ, mapped_at_creation: false });
+        let rb = self.acquire_readback_buffer(rb_size);
         self.end_pass();
         self.encoder().copy_texture_to_buffer(
             TexelCopyTextureInfo { texture: &tex, mip_level: mip, origin: Origin3d { x: x0, y: y0, z: if three { z0 } else { layer } }, aspect: TextureAspect::All },
@@ -3943,7 +3981,7 @@ impl Gpu {
             };
             s2.store(value, Ordering::SeqCst);
         });
-        self.pending_maps.push(PendingMap { buf, status, kind });
+        self.pending_maps.push(PendingMap { buf, status, kind, started: Instant::now() });
     }
 
     fn process_maps(&mut self, wait: bool) {
@@ -3954,7 +3992,8 @@ impl Gpu {
             let status = if self.lost.load(Ordering::SeqCst) { -1 } else { self.pending_maps[i].status.load(Ordering::SeqCst) };
             if status == 0 { i += 1; continue; }
             let pm = self.pending_maps.swap_remove(i);
-            let PendingMap { buf, kind, .. } = pm;
+            let PendingMap { buf, kind, started, .. } = pm;
+            let was_readback = matches!(kind, MapKind::Readback { .. });
             // A failed mapping (an invalid buffer, a lost device) must not take
             // the renderer down, and the engine must not wait forever for a
             // readback that will not arrive: report it and answer anyway.
@@ -3999,6 +4038,21 @@ impl Gpu {
             }
             if let MapKind::Readback { flag, .. } = &kind {
                 if *flag != 0 { self.mem.word(*flag).store(0, Ordering::SeqCst); let _ = self.mem.notify(*flag); }
+            }
+            if was_readback {
+                let ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+                self.readback_completions += 1;
+                self.readback_max_wait_ns = self.readback_max_wait_ns.max(ns);
+                if ns >= 50_000_000 { self.readback_slow_50ms += 1; }
+            }
+            if mapped && !self.lost.load(Ordering::SeqCst) && buf.size() <= 8 * 1024 * 1024
+                && self.readback_pool.len() < 4
+                && self.readback_pool.iter().map(Buffer::size).sum::<u64>()
+                    .saturating_add(buf.size()) <= 8 * 1024 * 1024
+            {
+                // The mapped view was dropped and unmap() completed above.
+                // Do not recycle a buffer while the GPU still owns it.
+                self.readback_pool.push(buf);
             }
         }
     }
@@ -4083,7 +4137,7 @@ impl Gpu {
         }
         enc.copy_buffer_to_buffer(&rb, 0, &map, 0, bytes);
         let status = Arc::new(AtomicI32::new(0));
-        Some(PendingMap { buf: map, status, kind: MapKind::Occlusion { list: out } })
+        Some(PendingMap { buf: map, status, kind: MapKind::Occlusion { list: out }, started: Instant::now() })
     }
     fn on_submitted(&mut self) {
         if !self.pending_events.is_empty() {
@@ -4320,6 +4374,16 @@ impl Gpu {
                 frames as f64 / dt, crate::footprint_mb(), crate::runtime_memory_mb(), frames, self.clears_folded, (self.draws - self.fps_d0) / frames.max(1), self.pending_skips - self.pending_skips0, (self.submits - self.submits0) as f64 / frames.max(1) as f64,
                 (self.passes - self.passes0) as f64 / frames.max(1) as f64, self.skipped, self.pipe_creates, self.bind_groups.len(), self.errors.load(Ordering::Relaxed)
             ));
+            #[cfg(target_os = "android")]
+            if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+                log(&format!(
+                    "android memory: RSS {} MiB, anonymous {} MiB, file-backed {} MiB, swap {} MiB; native C game heap is not included in the separate game heap counter",
+                    process_status_kib(&status, "VmRSS:") >> 10,
+                    process_status_kib(&status, "RssAnon:") >> 10,
+                    process_status_kib(&status, "RssFile:") >> 10,
+                    process_status_kib(&status, "VmSwap:") >> 10
+                ));
+            }
             if let Some(r) = self.instance.generate_report() {
                 let h = &r.hub;
                 log(&format!("live wgpu objects: buffers {} textures {} views {} bind groups {} samplers {} pipelines {} | engine objects {}",
@@ -4359,6 +4423,20 @@ impl Gpu {
                 self.evicted_buffers, self.restored_buffers, self.restore_data_bytes >> 20,
                 GPU_RESTORE_BUDGET >> 20
             ));
+            log(&format!(
+                "gpu maintenance: oldest-candidate scans {} max {:.3} ms; mapped readbacks completed {} slow(>=50ms) {} max {:.1} ms; staging reuse hits {} misses {} retained {} buffers/{} KiB; outstanding maps {}",
+                self.eviction_scan_count, self.eviction_scan_max_ns as f64 / 1e6,
+                self.readback_completions, self.readback_slow_50ms, self.readback_max_wait_ns as f64 / 1e6,
+                self.readback_pool_hits, self.readback_pool_misses, self.readback_pool.len(),
+                self.readback_pool.iter().map(Buffer::size).sum::<u64>() >> 10, self.pending_maps.len()
+            ));
+            self.eviction_scan_count = 0;
+            self.eviction_scan_max_ns = 0;
+            self.readback_completions = 0;
+            self.readback_slow_50ms = 0;
+            self.readback_max_wait_ns = 0;
+            self.readback_pool_hits = 0;
+            self.readback_pool_misses = 0;
             // Report idle GPU allocations without deleting guest-owned
             // resources: residency can only be reclaimed safely after the
             // engine unbinds/releases an object or supplies data to restore it.
@@ -4535,6 +4613,23 @@ fn resource_cold(frame: u64, born: u64, last_used: Option<u64>, threshold: u64) 
     frame.saturating_sub(last_used.unwrap_or(born)) >= threshold
 }
 
+// Faster bounded selection: only the oldest recoverable candidates need
+// ordering. Deterministic tie breaking keeps behavior reproducible.
+fn oldest_candidates(items: &mut Vec<(u64, u32)>, max: usize) {
+    if items.len() > max {
+        items.select_nth_unstable(max);
+        items.truncate(max);
+    }
+    items.sort_unstable();
+}
+
+#[cfg(target_os = "android")]
+fn process_status_kib(status: &str, field: &str) -> u64 {
+    status.lines().find_map(|line| {
+        line.strip_prefix(field)?.split_whitespace().next()?.parse::<u64>().ok()
+    }).unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4568,6 +4663,24 @@ mod tests {
         assert!(!lazy_vertex_index_buffer(1 | 0x80, 0));
         assert!(!lazy_vertex_index_buffer(1, 0x10));
         assert!(!lazy_vertex_index_buffer(1, 1));
+    }
+
+    #[test]
+    fn candidate_selection_only_keeps_oldest_ids() {
+        let mut items = vec![(10, 7), (3, 8), (8, 3), (3, 2), (40, 1)];
+        oldest_candidates(&mut items, 3);
+        assert_eq!(items, vec![(3, 2), (3, 8), (8, 3)]);
+        oldest_candidates(&mut items, 0);
+        assert!(items.is_empty());
+    }
+
+    #[cfg(target_os = "android")]
+    #[test]
+    fn android_rss_breakdown_parses_kib_fields() {
+        let status = "VmRSS:\t3912000 kB\nRssAnon:\t3700000 kB\nRssFile:\t212000 kB\n";
+        assert_eq!(process_status_kib(status, "VmRSS:"), 3912000);
+        assert_eq!(process_status_kib(status, "RssFile:"), 212000);
+        assert_eq!(process_status_kib(status, "VmSwap:"), 0);
     }
 
     #[test]
