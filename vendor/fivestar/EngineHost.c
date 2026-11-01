@@ -414,23 +414,46 @@ int32_t PGLastInputDevice(void) {
   return atomic_load_explicit((const _Atomic int32_t *)(void *)((const uint8_t *)(void *)env.memory.data + 24627136), memory_order_relaxed);
 }
 
-void PGFillAudio(float *left, float *right, uint32_t count) {
-  memset(left, 0, count * sizeof(float)); memset(right, 0, count * sizeof(float));
+// Aggregate audio diagnostics, without blocking the engine mixer or logging
+// from the real-time read callback on each sample.
+static _Atomic uint64_t audioUnderflowFrames, audioOverflowFrames;
+void PGGetAudioDiagnostics(uint64_t *underflow, uint64_t *overflow) {
+  if (underflow) *underflow = atomic_load(&audioUnderflowFrames);
+  if (overflow) *overflow = atomic_load(&audioOverflowFrames);
+}
+// Returns genuine mixer frames and writes silence only for missing frames.
+// The old implementation could replay stale samples on a circular-ring
+// overrun and silently fill an entire Java block with zeroes.
+uint32_t PGFillAudio(float *left, float *right, uint32_t count) {
+  if (!left || !right || !count) return 0;
+  memset(left, 0, count * sizeof(float));
+  memset(right, 0, count * sizeof(float));
   uint64_t ring = atomic_load(&audioRing);
-  if (!ring) return;
+  if (!ring) return 0;
   uint32_t capacity = atomic_load(&audioCapacity);
+  if (!capacity) return 0;
   _Atomic uint32_t *header = pg_pointer(&env, ring, 64 + (u64)capacity * 8);
   float *data = (float *)((uint8_t *)(void *)header + 64);
-  uint32_t read = atomic_load(header + 1), write = atomic_load(header);
+  uint32_t read = atomic_load_explicit(header + 1, memory_order_relaxed);
+  uint32_t write = atomic_load_explicit(header, memory_order_acquire);
   uint32_t available = write - read;
+  if (available > capacity) {
+    // Mixer overwrote unread data. Catch up to the newest valid window
+    // rather than replaying samples whose ring slots now contain other audio.
+    atomic_fetch_add(&audioOverflowFrames, (uint64_t)(available - capacity));
+    read = write - capacity;
+    available = capacity;
+  }
   uint32_t take = available < count ? available : count;
-  if (take > capacity) take = capacity;
   for (uint32_t i = 0; i < take; i++) {
     uint32_t at = ((read + i) & (capacity - 1)) * 2;
-    left[i] = data[at]; right[i] = data[at + 1];
+    left[i] = data[at];
+    right[i] = data[at + 1];
   }
-  atomic_store(header + 1, read + take);
+  if (take < count) atomic_fetch_add(&audioUnderflowFrames, (uint64_t)(count - take));
+  atomic_store_explicit(header + 1, read + take, memory_order_release);
   atomic_fetch_add(header + 3, 1);
+  return take;
 }
 
 static char *configuredQuality[32];static unsigned configuredQualityCount;
