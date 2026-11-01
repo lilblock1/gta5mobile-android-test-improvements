@@ -39,6 +39,13 @@ final class NativeAudioBufferPolicy {
         return available < BLOCK_FRAMES && queued >= MIN_QUEUED_FRAMES;
     }
 
+    // Emulate browser AudioWorklet startup: after a bounded grace period,
+    // begin callback delivery with silence even if the game mixer is empty.
+    static boolean waitForInitialSamples(int available, int capacity, long elapsedMs) {
+        return available == 0 &&
+            (capacity <= 0 || elapsedMs < MAX_STARTUP_WAIT_MS);
+    }
+
     static long queueDepth(long written, long played) {
         // AudioTrack's head uses a wrapping unsigned 32-bit frame count.
         // We only retain a bounded total; after a full wrap the caller
