@@ -7,8 +7,13 @@ class FastNativeRepackPolicy(unittest.TestCase):
     def test_download_control(self):
         launcher = (ROOT / "android/app/src/main/java/dev/muguet/LauncherActivity.java").read_text()
         self.assertIn('downloadGameButton.setText("Download game files (HTTPS)")', launcher)
-        self.assertIn("installOnFirstPlay(EngineActivity.class);", launcher)
-        self.assertIn("downloadGameButton.setEnabled(!ready && folder.isEmpty())", launcher)
+        self.assertIn('downloadGameButton.setOnClickListener(v -> downloadGameFiles());', launcher)
+        self.assertIn('private void downloadGameFiles()', launcher)
+        self.assertIn('installOnFirstPlay(null);', launcher)
+        self.assertIn('downloadGameButton.setEnabled(true);', launcher)
+        self.assertIn('else if (activity != null) launch(activity);', launcher)
+        self.assertIn('GameDataInstaller.HTTPS', launcher)
+        self.assertNotIn('downloadGameButton.setEnabled(!ready && folder.isEmpty())', launcher)
 
     def test_fast_workflow(self):
         workflow = (ROOT / ".github/workflows/native-arm64-fast-repack.yml").read_text()

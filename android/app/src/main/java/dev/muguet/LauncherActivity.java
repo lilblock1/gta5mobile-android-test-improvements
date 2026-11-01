@@ -568,30 +568,11 @@ public final class LauncherActivity extends Activity {
         });
         column.addView(pauseDownload);
         column.addView(play);
-        // Keep the game-data downloader visible on the native-only Play page.
-        // The same verified HTTPS manifest downloader remains in GameDataInstaller.
+        // Restore the original first-Play HTTPS installer on an explicit button.
+        // It downloads independently of native graphics initialization.
         downloadGameButton = new Button(this);
         downloadGameButton.setText("Download game files (HTTPS)");
-        downloadGameButton.setOnClickListener(v -> {
-            if (importing) return;
-            try {
-                String selected = folderPath();
-                if (selected == null) {
-                    status.setText("Selected folder is unreadable. In Library, choose Go back to the imported copy before downloading.");
-                    return;
-                }
-                if (!selected.isEmpty()) {
-                    status.setText("A game folder is selected. In Library, choose Go back to the imported copy to download instead.");
-                    return;
-                }
-                if (nativePrepare(getFilesDir().getAbsolutePath())) {
-                    status.setText("Game data is already installed.");
-                    ready();
-                    return;
-                }
-                installOnFirstPlay(EngineActivity.class);
-            } catch (Exception e) { error(e); }
-        });
+        downloadGameButton.setOnClickListener(v -> downloadGameFiles());
         column.addView(downloadGameButton);
         playEngine = new Button(this);
         playEngine.setText("TEST NATIVE ARM64 (wasm2c) • experimental");
@@ -858,7 +839,9 @@ public final class LauncherActivity extends Activity {
         if (importing) { play.setEnabled(false); playEngine.setEnabled(false); downloadGameButton.setEnabled(false); return; }
         // Not ready yet: the load is in flight, and its result calls back into here.
         if (!nativeLoaded.get()) {
-            play.setEnabled(false); playEngine.setEnabled(false); downloadGameButton.setEnabled(false);
+            play.setEnabled(false); playEngine.setEnabled(false);
+            // Downloads must remain available even when renderer JNI fails to load.
+            downloadGameButton.setEnabled(true);
             if (nativeFailure.get() != null) return; // already reported
             status.setText("Loading the game library…");
             ensureNative();
@@ -874,9 +857,9 @@ public final class LauncherActivity extends Activity {
                 clearFolderButton.setVisibility(pickedSomething ? android.view.View.VISIBLE : android.view.View.GONE);
                 grantAccessButton.setVisibility(pickedSomething && !hasAllFilesAccess() ? android.view.View.VISIBLE : android.view.View.GONE);
                 play.setEnabled(false); playEngine.setEnabled(false);
-                downloadGameButton.setEnabled(false);
+                downloadGameButton.setEnabled(true);
                 downloadGameButton.setVisibility(android.view.View.VISIBLE);
-                status.setText(pickedSomething ? "Game folder not readable. In Library, clear the selected folder before downloading." : "Import game data to begin.");
+                status.setText(pickedSomething ? "External game folder unreadable. Download an app-local copy or choose another folder in Library." : "Tap Download game files to install the original HTTPS chunks.");
                 return;
             }
             grantAccessButton.setVisibility(android.view.View.GONE);
@@ -895,13 +878,46 @@ public final class LauncherActivity extends Activity {
             boolean canPlay = ready || folder.isEmpty();
             play.setEnabled(canPlay);
             playEngine.setEnabled(ready);
-            downloadGameButton.setVisibility(ready ? android.view.View.GONE : android.view.View.VISIBLE);
-            downloadGameButton.setEnabled(!ready && folder.isEmpty());
+            // Keep a working download control even with an invalid external folder.
+            // Unlike Play, it does not depend on nativePrepare() or nativeLoaded.
+            downloadGameButton.setVisibility(android.view.View.VISIBLE);
+            downloadGameButton.setEnabled(true);
             play.setText(ready ? "Play — native ARM64 (experimental)" : "Play — download game data");
             status.setText(ready ? "Game data ready."
                 : folder.isEmpty() ? "Tap Download game files (HTTPS), or import your existing files. Keep the app open during setup."
                 : "Selected game folder is incomplete. In Library, clear the selected folder to download.");
         } catch (Exception e) { play.setEnabled(false); playEngine.setEnabled(false); error(e); }
+    }
+
+    // The original installer ran on the first Play: the same GameDataInstaller
+    // downloads the original HTTPS manifest and hash-checked chunks. Unlike
+    // nativePrepare(), this is entirely Java and does not need the GPU/engine to
+    // have initialized. This is important when native rendering fails at startup.
+    private void downloadGameFiles() {
+        if (importing) return;
+        File existing = new File(getFilesDir(), "game");
+        if (existing.exists()) {
+            status.setText("A game folder already exists in app storage. The original downloader will not overwrite it. "
+                + "Use the existing game data or back it up before replacing an incomplete installation.");
+            return;
+        }
+        boolean externalSelected = !settings.optString("game_folder_uri", "").isEmpty()
+            || !settings.optString("game_folder_path", "").isEmpty();
+        if (externalSelected) {
+            new AlertDialog.Builder(this)
+                .setTitle("Download to app storage?")
+                .setMessage("This will switch from your selected external folder to a new copy in app storage. "
+                    + "Your external files will not be deleted. The original HTTPS installer supports pause and resume.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Download", (dialog, which) -> {
+                    settings.remove("game_folder_uri");
+                    settings.remove("game_folder_path");
+                    saveSettings();
+                    installOnFirstPlay(null);
+                }).show();
+            return;
+        }
+        installOnFirstPlay(null);
     }
 
     private void installOnFirstPlay(Class<?> activity) {
@@ -928,7 +944,8 @@ public final class LauncherActivity extends Activity {
                 getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                 ready();
                 if (result != null) error(result);
-                else launch(activity);
+                else if (activity != null) launch(activity);
+                else status.setText("Game files downloaded and verified. Tap Play to launch the native engine.");
             });
         });
     }
