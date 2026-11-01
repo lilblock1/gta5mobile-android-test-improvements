@@ -1529,11 +1529,21 @@ impl Gpu {
             log(&format!("shader pipeline workers: {compiler_workers}"));
             for i in 0..compiler_workers {
                 let (dev, lost, rx, tx, disk) = (device.clone(), lost.clone(), job_rx.clone(), res_tx.clone(), pipeline_disk.clone());
-                std::thread::Builder::new().name(format!("pipeline-compile-{i}")).spawn(move || loop {
+                std::thread::Builder::new().name(format!("pipeline-compile-{i}")).spawn(move || {
+                    // Cutting graphics shader-compile contention protects
+                    // audio and game simulation when a movie introduces many
+                    // first-use materials. Android Linux nice is per-thread;
+                    // the game and audio threads retain their own priority.
+                    #[cfg(target_os = "android")]
+                    unsafe {
+                        libc::setpriority(libc::PRIO_PROCESS, 0, 8);
+                    }
+                    loop {
                     let job = rx.lock().unwrap().recv();
                     let Ok((id, job)) = job else { return };
                     let p = compile_pipeline(&dev, &lost, &job, disk.as_ref());
                     if tx.send((id, p)).is_err() { return; }
+                    }
                 }).expect("spawn compile thread");
             }
             Some(job_tx)
