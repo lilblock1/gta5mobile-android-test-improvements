@@ -46,6 +46,14 @@ final class NativeAudioBufferPolicy {
             (capacity <= 0 || elapsedMs < MAX_STARTUP_WAIT_MS);
     }
 
+    static boolean shouldStartAudioTrack(int available, int capacity, long elapsedMs) {
+        if (capacity <= 0) return false;
+        // Begin playback as soon as a genuine startup watermark is present,
+        // or after the bounded grace period even if the producer is silent.
+        return available >= startupWatermark(capacity) ||
+            elapsedMs >= MAX_STARTUP_WAIT_MS;
+    }
+
     static long queueDepth(long written, long played) {
         // AudioTrack's head uses a wrapping unsigned 32-bit frame count.
         // We only retain a bounded total; after a full wrap the caller

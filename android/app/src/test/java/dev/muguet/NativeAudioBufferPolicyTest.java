@@ -28,6 +28,11 @@ public final class NativeAudioBufferPolicyTest {
         assertTrue(NativeAudioBufferPolicy.waitForInitialSamples(0, 16384, 1499));
         assertFalse(NativeAudioBufferPolicy.waitForInitialSamples(0, 16384, 1500));
         assertFalse(NativeAudioBufferPolicy.waitForInitialSamples(256, 16384, 100));
+        assertFalse(NativeAudioBufferPolicy.shouldStartAudioTrack(0, 0, 5000));
+        assertFalse(NativeAudioBufferPolicy.shouldStartAudioTrack(0, 16384, 1499));
+        assertTrue(NativeAudioBufferPolicy.shouldStartAudioTrack(0, 16384, 1500));
+        assertTrue(NativeAudioBufferPolicy.shouldStartAudioTrack(3072, 16384, 0));
+        assertFalse(NativeAudioBufferPolicy.shouldStartAudioTrack(2048, 16384, 0));
         assertEquals(2048, NativeAudioBufferPolicy.queueDepth(4096, 2048));
         assertEquals(0, NativeAudioBufferPolicy.queueDepth(2048, 4096));
     }

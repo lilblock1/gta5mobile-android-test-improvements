@@ -494,7 +494,8 @@ public final class EngineActivity extends Activity {
             long startedAt = android.os.SystemClock.elapsedRealtime();
             long lastReport = startedAt;
             long lastStartupReport = startedAt;
-            boolean bootstrapReported = false;
+            boolean firstPullReported = false;
+            boolean firstWriteReported = false;
             long lastProduced = nativeAudioProducedFrames() & 0xffffffffL;
             long lastWrittenFrames = 0;
             // A ten-second mean hides severe one-second audio starvation,
@@ -586,17 +587,30 @@ public final class EngineActivity extends Activity {
                     catch (InterruptedException stop) { return; }
                     continue;
                 }
-                if (priming && available == 0 && capacity > 0 && !bootstrapReported) {
-                    // A missing browser-style consumer callback may leave
-                    // the engine producer idle forever. Generate bounded
-                    // silence so PGFillAudio can advance callback accounting.
-                    bootstrapReported = true;
-                    String message = "AudioTrack starting empty-ring bootstrap after "
-                        + (now - startedAt) + "ms; workletCallbacks="
-                        + nativeAudioCallbackCount();
-                    Log.w("NightlaneAudio", message);
-                    try { nativeAudioReport(message); }
-                    catch (Throwable ignored) {}
+                if (priming && NativeAudioBufferPolicy.shouldStartAudioTrack(
+                        available, capacity, now - startedAt)) {
+                    // Crucial: AudioTrack.MODE_STREAM WRITE_BLOCKING can stall
+                    // while trying to prefill an output that is not PLAYING.
+                    // Previously track.play() was called only after 2048 frames
+                    // had been written, which may never happen on some HALs.
+                    // Start the consumer before the first write, after the
+                    // bounded producer grace period (or a full live prebuffer).
+                    try {
+                        track.play();
+                        audioStarted = true;
+                    } catch (IllegalStateException failure) {
+                        Log.e("NightlaneAudio", "Unable to start AudioTrack before PCM writes", failure);
+                        String message = "AudioTrack.play() failed: " + failure;
+                        try { nativeAudioReport(message); } catch (Throwable ignored) {}
+                        audioThreadRunning = false;
+                        return;
+                    }
+                    String message = "AudioTrack.play() before first PCM write at "
+                        + (now - startedAt) + "ms, mixerAvailable=" + available
+                        + "/" + capacity + " workletCallbacks=" + nativeAudioCallbackCount()
+                        + " platformBufferFrames=" + track.getBufferCapacityInFrames();
+                    Log.i("NightlaneAudio", message);
+                    try { nativeAudioReport(message); } catch (Throwable ignored) {}
                 }
                 // Avoid injecting 1024 zero frames whenever the producer only
                 // has a partial block. Consume valid samples, retain remaining
@@ -609,6 +623,15 @@ public final class EngineActivity extends Activity {
                     Log.e("NightlaneAudio", "Native audio pull failed", failure);
                     return;
                 }
+                if (!firstPullReported) {
+                    firstPullReported = true;
+                    String message = "AudioTrack first native PCM pull: requested=" + request
+                        + " returned=" + frames
+                        + " mixerProduced=" + (nativeAudioProducedFrames() & 0xffffffffL)
+                        + " workletCallbacks=" + nativeAudioCallbackCount();
+                    Log.i("NightlaneAudio", message);
+                    try { nativeAudioReport(message); } catch (Throwable ignored) {}
+                }
                 if (frames <= 0) {
                     emptyReads++;
                     try { Thread.sleep(5); }
@@ -617,9 +640,23 @@ public final class EngineActivity extends Activity {
                 }
                 int requestedSamples = Math.min(frames * 2, block.length);
                 int offset = 0;
+                if (!firstWriteReported) {
+                    String message = "AudioTrack first PCM WRITE_BLOCKING start: samples="
+                        + requestedSamples + " playing=" + audioStarted;
+                    try { nativeAudioReport(message); } catch (Throwable ignored) {}
+                }
                 while (offset < requestedSamples && audioThreadRunning && !audioPaused) {
                     int requested = requestedSamples - offset;
-                    int wrote = track.write(block, offset, requested, AudioTrack.WRITE_BLOCKING);
+                    int wrote;
+                    try {
+                        wrote = track.write(block, offset, requested, AudioTrack.WRITE_BLOCKING);
+                    } catch (RuntimeException writeError) {
+                        Log.e("NightlaneAudio", "AudioTrack blocking write failed", writeError);
+                        try { nativeAudioReport("AudioTrack.write failed: " + writeError); }
+                        catch (Throwable ignored) {}
+                        audioThreadRunning = false;
+                        return;
+                    }
                     if (wrote > 0) {
                         offset += wrote;
                         if (wrote < requested) shortWrites++;
@@ -629,20 +666,19 @@ public final class EngineActivity extends Activity {
                         shortWrites++;
                         break;
                     } else {
-                        Log.w("NightlaneAudio", "AudioTrack write returned " + wrote);
+                        String message = "AudioTrack.write returned error " + wrote;
+                        Log.w("NightlaneAudio", message);
+                        try { nativeAudioReport(message); } catch (Throwable ignored) {}
                         audioThreadRunning = false;
                         break;
                     }
                 }
-                if (!audioStarted && writtenFrames >= Math.min(2048,
-                        Math.max(256, NativeAudioBufferPolicy.startupWatermark(capacity)))) {
-                    if (!audioPaused && audioThreadRunning) {
-                        try { track.play(); audioStarted = true; }
-                        catch (IllegalStateException failure) {
-                            Log.e("NightlaneAudio", "Unable to begin primed audio stream", failure);
-                            audioThreadRunning = false;
-                        }
-                    }
+                if (!firstWriteReported) {
+                    firstWriteReported = true;
+                    String message = "AudioTrack first PCM write finished: samples="
+                        + offset + "/" + requestedSamples + " playing=" + audioStarted;
+                    Log.i("NightlaneAudio", message);
+                    try { nativeAudioReport(message); } catch (Throwable ignored) {}
                 }
                 if (now - lastReport >= 10000) {
                     long produced = nativeAudioProducedFrames() & 0xffffffffL;
@@ -653,6 +689,7 @@ public final class EngineActivity extends Activity {
                         + " ringAvailable=" + available + "/" + capacity
                         + " workletCallbacks=" + nativeAudioCallbackCount()
                         + " outputQueued=" + queued + " peakQueue=" + peakQueue
+                        + " audioState=" + track.getPlayState()
                         + " AndroidUnderruns=" + track.getUnderrunCount()
                         + " shortWrites=" + shortWrites + " emptyReads=" + emptyReads
                         + " producerWaits=" + waitingCycles

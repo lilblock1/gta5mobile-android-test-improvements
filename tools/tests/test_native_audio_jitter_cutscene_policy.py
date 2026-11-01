@@ -41,8 +41,11 @@ class NativeAudioJitterSafetyTests(unittest.TestCase):
         # Previously this unconditional empty-ring wait permanently disabled
         # output whenever the game mixer produced no frames at startup.
         self.assertIn("NativeAudioBufferPolicy.waitForInitialSamples(", activity)
-        self.assertIn("capacity > 0 && !bootstrapReported", activity)
-        self.assertIn("AudioTrack starting empty-ring bootstrap", activity)
+        self.assertIn("NativeAudioBufferPolicy.shouldStartAudioTrack(", activity)
+        self.assertIn("AudioTrack.play() before first PCM write", activity)
+        self.assertIn("AudioTrack first PCM write finished:", activity)
+        self.assertLess(activity.index("track.play();"), activity.index("track.write(block, offset, requested, AudioTrack.WRITE_BLOCKING)"))
+        self.assertNotIn("writtenFrames >= Math.min(2048", activity)
         self.assertIn("nativeAudioCallbackCount()", activity)
         self.assertNotIn("if (priming && available == 0) {", activity)
         self.assertIn("int request = available > 0 ? Math.min(", activity)
