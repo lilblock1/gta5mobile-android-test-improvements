@@ -398,32 +398,33 @@ static void nativeUpdatePad(JNIEnv *env, jobject thiz, jobjectArray keys,
     const char *key = (*env)->GetStringUTFChars(env, k, NULL);
     if (!key) continue;
 
-    // Movement / look keys become analog stick deflection. These are the keyboard
-    // fallbacks (a real gamepad or the touch stick is handled separately), so give
-    // them full-scale deflection for crisp response.
-    if (!strcmp(key, "KeyA"))        { pad.leftX = -1.0f; pad.buttons |= PAD_DPAD_LEFT; }
-    else if (!strcmp(key, "KeyD"))   { pad.leftX =  1.0f; pad.buttons |= PAD_DPAD_RIGHT; }
-    else if (!strcmp(key, "KeyW") || !strcmp(key, "Numpad8")) { pad.leftY =  1.0f; pad.buttons |= PAD_DPAD_UP; }
-    else if (!strcmp(key, "KeyS") || !strcmp(key, "Numpad2")) { pad.leftY = -1.0f; pad.buttons |= PAD_DPAD_DOWN; }
+    // Movement is exclusively on the left stick: never emit D-pad events,
+    // which otherwise open the phone or navigate menus while walking.
+    if (!strcmp(key, "KeyA"))        { pad.leftX = -1.0f; }
+    else if (!strcmp(key, "KeyD"))   { pad.leftX =  1.0f; }
+    else if (!strcmp(key, "KeyW") || !strcmp(key, "Numpad8")) { pad.leftY =  1.0f; }
+    else if (!strcmp(key, "KeyS") || !strcmp(key, "Numpad2")) { pad.leftY = -1.0f; }
 
-    // Action buttons. FIRE maps to R2 (shoot / accelerate), AIM to L2.
-    else if (!strcmp(key, "Space"))     { pad.buttons |= PAD_A; }   // jump / handbrake
-    else if (!strcmp(key, "KeyF"))      { pad.buttons |= PAD_X; }   // enter vehicle
-    else if (!strcmp(key, "ShiftLeft")) { pad.buttons |= PAD_L3; }  // sprint
-    else if (!strcmp(key, "ControlLeft")) { pad.buttons |= PAD_L1; }
-    else if (!strcmp(key, "Tab"))       { pad.buttons |= PAD_R1; }  // weapon wheel
-    else if (!strcmp(key, "KeyQ"))      { pad.buttons |= PAD_R3; }  // cover / radio
-    else if (!strcmp(key, "KeyC"))      { pad.buttons |= PAD_Y; }
-    else if (!strcmp(key, "KeyV"))      { pad.buttons |= PAD_B; }   // camera
-    else if (!strcmp(key, "KeyR"))      { pad.buttons |= PAD_X; }   // reload
-    else if (!strcmp(key, "Escape"))    { pad.buttons |= PAD_START; }
-    else if (!strcmp(key, "Enter"))     { pad.buttons |= PAD_A; }
-    else if (!strcmp(key, "ArrowUp"))   { pad.buttons |= PAD_DPAD_UP; }
-    else if (!strcmp(key, "ArrowDown")) { pad.buttons |= PAD_DPAD_DOWN; }
-    else if (!strcmp(key, "ArrowLeft")) { pad.buttons |= PAD_DPAD_LEFT; }
-    else if (!strcmp(key, "ArrowRight")){ pad.buttons |= PAD_DPAD_RIGHT; }
-    else if (!strcmp(key, "Backspace")) { pad.buttons |= PAD_B; }
-    else if (!strcmp(key, "AltLeft"))   { pad.buttons |= PAD_SELECT; }
+    // GTA-style Xbox pad: A sprint, X jump, Y enter/exit, B reload.
+    else if (!strcmp(key, "Space"))      { pad.buttons |= PAD_X; }
+    else if (!strcmp(key, "handbrake"))  { pad.buttons |= PAD_R1; }
+    else if (!strcmp(key, "KeyF"))       { pad.buttons |= PAD_Y; }
+    else if (!strcmp(key, "ShiftLeft"))  { pad.buttons |= PAD_A; }
+    else if (!strcmp(key, "ControlLeft")){ pad.buttons |= PAD_L3; }
+    else if (!strcmp(key, "Tab"))        { pad.buttons |= PAD_L1; }
+    else if (!strcmp(key, "KeyQ"))       { pad.buttons |= PAD_R1; }
+    else if (!strcmp(key, "radio"))      { pad.buttons |= PAD_DPAD_LEFT; }
+    else if (!strcmp(key, "lookBack") || !strcmp(key, "KeyC")) { pad.buttons |= PAD_R3; }
+    else if (!strcmp(key, "KeyV"))       { pad.buttons |= PAD_SELECT; }
+    else if (!strcmp(key, "KeyR"))       { pad.buttons |= PAD_B; }
+    else if (!strcmp(key, "Escape"))     { pad.buttons |= PAD_START; }
+    else if (!strcmp(key, "Enter"))      { pad.buttons |= PAD_A; }
+    else if (!strcmp(key, "ArrowUp"))    { pad.buttons |= PAD_DPAD_UP; }
+    else if (!strcmp(key, "ArrowDown"))  { pad.buttons |= PAD_DPAD_DOWN; }
+    else if (!strcmp(key, "ArrowLeft"))  { pad.buttons |= PAD_DPAD_LEFT; }
+    else if (!strcmp(key, "ArrowRight")) { pad.buttons |= PAD_DPAD_RIGHT; }
+    else if (!strcmp(key, "Backspace"))  { pad.buttons |= PAD_B; }
+    else if (!strcmp(key, "AltLeft"))    { pad.buttons |= PAD_DPAD_DOWN; }
 
     (*env)->ReleaseStringUTFChars(env, k, key);
   }
@@ -431,8 +432,8 @@ static void nativeUpdatePad(JNIEnv *env, jobject thiz, jobjectArray keys,
   // Touch-only bits.
   if (touchButtons & 1) pad.rightTrigger = 1.0f;                 // fire
   if (touchButtons & 2) pad.leftTrigger = 1.0f;                  // aim
-  if (touchButtons & 4) pad.buttons |= PAD_B;                    // brake
-  if (horn)              pad.buttons |= PAD_SELECT;              // horn -> select (vehicle)
+  if (touchButtons & 4) pad.leftTrigger = 1.0f;                 // brake
+  if (horn)              pad.buttons |= PAD_L3;                   // horn (vehicle)
 
   PGUpdateVirtualPad(pad);
 }
