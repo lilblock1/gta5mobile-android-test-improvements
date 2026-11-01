@@ -35,6 +35,11 @@ class NativeCinematicPacingSafetyTests(unittest.TestCase):
     def test_audio_telemetry_catches_bad_one_second_windows(self):
         java = read("android/app/src/main/java/dev/muguet/EngineActivity.java")
         self.assertIn("worstSecondProducedFps", java)
+        # 48-kHz AudioTrack sample rate is already named "rate" in
+        # startAudio(); Java lambdas cannot redeclare enclosing locals.
+        self.assertIn("long producedFramesPerSecond = newFrames * 1000L / secondsElapsedMs;", java)
+        self.assertNotIn("long rate = newFrames * 1000L / secondsElapsedMs;", java)
+        self.assertIn("if (producedFramesPerSecond < 46000)", java)
         self.assertIn('min1sProducedFps=', java)
         self.assertIn('slowProducerSeconds=', java)
         self.assertIn("nativeAudioProducedFrames() & 0xffffffffL", java)
