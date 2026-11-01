@@ -432,6 +432,15 @@ uint32_t PGAvailableAudioFrames(uint32_t *reportedCapacity) {
   uint32_t available = write - read;
   return available < capacity ? available : capacity;
 }
+// The producer owns header[0], which advances once for every mixed frame.
+// Return unsigned to preserve wrapping difference across samples.
+uint32_t PGProducedAudioFrames(void) {
+  uint64_t ring = atomic_load_explicit(&audioRing, memory_order_acquire);
+  uint32_t capacity = atomic_load_explicit(&audioCapacity, memory_order_acquire);
+  if (!ring || !capacity) return 0;
+  _Atomic uint32_t *header = pg_pointer(&env, ring, 64 + (u64)capacity * 8);
+  return atomic_load_explicit(header, memory_order_acquire);
+}
 void PGGetAudioDiagnostics(uint64_t *underflow, uint64_t *overflow) {
   if (underflow) *underflow = atomic_load(&audioUnderflowFrames);
   if (overflow) *overflow = atomic_load(&audioOverflowFrames);
