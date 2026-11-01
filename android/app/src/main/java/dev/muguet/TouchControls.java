@@ -100,9 +100,9 @@ final class TouchControls extends View {
         // Keep the movement and driving controls in the bottom corners.
         // Both the hit target and the painted circle use the same scale.
         if (!inCar) add(left + (right - left) * 0.33f, bottom - 68*k, 36*k, "FIRE", "fire");
-        add(right - 62*k, bottom - 68*k, 40*k, inCar ? "GAS" : "FIRE", inCar ? "KeyW" : "fire");
-        add(right - 158*k, bottom - 46*k, 31*k, inCar ? "BRAKE" : "AIM", inCar ? "KeyS" : "aim");
-        add(right - 58*k, bottom - 168*k, 28*k, inCar ? "H.BRAKE" : "JUMP", "Space");
+        add(right - 62*k, bottom - 68*k, 40*k, inCar ? "GAS" : "FIRE", inCar ? "gas" : "fire");
+        add(right - 158*k, bottom - 46*k, 31*k, inCar ? "BRAKE" : "AIM", inCar ? "brake" : "aim");
+        add(right - 58*k, bottom - 168*k, 28*k, inCar ? "H.BRAKE" : "JUMP", inCar ? "handbrake" : "Space");
         add(right - 140*k, bottom - 132*k, 26*k, inCar ? "EXIT" : "ENTER", "KeyF");
         add(right - 222*k, bottom - 98*k, 24*k, inCar ? "HORN" : "RELOAD", inCar ? "horn" : "KeyR");
         // Tutorial text occupies the very top of the screen. Move the toolbar
@@ -117,13 +117,13 @@ final class TouchControls extends View {
                 float sub = toolbarY + 54*k;
                 add(left + 36*k, sub, 19*k, "PHONE", "ArrowUp");
                 add(left + 94*k, sub, 19*k, "SWITCH", "AltLeft");
-                add(right - 36*k, sub, 19*k, inCar ? "RADIO" : "COVER", "KeyQ");
-                add(right - 94*k, sub, 19*k, inCar ? "LOOK BACK" : "CROUCH", inCar ? "KeyC" : "ControlLeft");
+                add(right - 36*k, sub, 19*k, inCar ? "RADIO" : "COVER", inCar ? "radio" : "KeyQ");
+                add(right - 94*k, sub, 19*k, inCar ? "LOOK BACK" : "CROUCH", inCar ? "lookBack" : "ControlLeft");
             }
         } else {
             add(right - 30*k, toolbarY, 22*k, "WEAPON", "Tab");
-            add(right - 84*k, toolbarY, 22*k, inCar ? "RADIO" : "COVER", "KeyQ");
-            add(right - 138*k, toolbarY, 22*k, inCar ? "LOOK BACK" : "CROUCH", inCar ? "KeyC" : "ControlLeft");
+            add(right - 84*k, toolbarY, 22*k, inCar ? "RADIO" : "COVER", inCar ? "radio" : "KeyQ");
+            add(right - 138*k, toolbarY, 22*k, inCar ? "LOOK BACK" : "CROUCH", inCar ? "lookBack" : "ControlLeft");
             add(right - 192*k, toolbarY, 22*k, "CAM", "KeyV");
             add(left + 30*k, toolbarY, 22*k, "PAUSE", "Escape");
             add(left + 84*k, toolbarY, 22*k, "PHONE", "ArrowUp");
@@ -167,7 +167,7 @@ final class TouchControls extends View {
                 Grip grip = grips.get(event.getPointerId(i));
                 if (grip == null) continue;
                 float x = event.getX(i) / density, y = event.getY(i) / density;
-                if (grip.button != -2 && !isWheel(grip))
+                if (grip.button == -1)
                     sendLook((x - grip.x) * 3 * lookSensitivity, (y - grip.y) * 3 * lookSensitivity);
                 grip.x = x; grip.y = y;
             }
@@ -185,7 +185,7 @@ final class TouchControls extends View {
     private boolean isWheel(Grip grip) {
         if (grip.button < 0 || grip.button >= buttons.size()) return false;
         String a = buttons.get(grip.button).action;
-        return a.equals("Tab") || a.equals("AltLeft") || (inCar && a.equals("KeyQ"));
+        return a.equals("Tab") || a.equals("AltLeft") || a.equals("radio");
     }
     Input input() {
         Input input = new Input();
@@ -202,7 +202,8 @@ final class TouchControls extends View {
                 if (!inCar && Math.hypot(dx, dy) > 0.95) input.keys.add("ShiftLeft");
             } else if (g.button >= 0 && g.button < buttons.size()) {
                 String a = buttons.get(g.button).action;
-                if (a.equals("fire")) input.buttons |= 1;
+                if (a.equals("fire") || a.equals("gas")) input.buttons |= 1;
+                else if (a.equals("brake")) input.buttons |= 4;
                 else if (a.equals("horn")) input.horn = true;
                 else if (!a.equals("aim") && !a.equals("nav")) input.keys.add(a);
                 if (isWheel(g)) {
