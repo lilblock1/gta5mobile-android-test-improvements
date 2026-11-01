@@ -499,6 +499,17 @@ static float pg_audio_soft_limit(float sample) {
 
 // Snapshot of game-produced stereo frames (low 32 bits) and ring capacity
 // (high 32 bits). Does not dequeue sound or acquire a Java array.
+// Exportable telemetry: the Java AudioTrack clock and its producer rate are
+// recorded in the same bounded native log as renderer stalls and cutscenes.
+static void nativeAudioReport(JNIEnv *env, jobject thiz, jstring message) {
+  (void)thiz;
+  if (!message) return;
+  const char *text = (*env)->GetStringUTFChars(env, message, NULL);
+  if (!text) return;
+  if (strnlen(text, 1024) < 1024) native_log_to_file("audio-track", text);
+  (*env)->ReleaseStringUTFChars(env, message, text);
+}
+
 static jlong nativeAudioProducedFrames(JNIEnv *env, jobject thiz) {
   (void)env; (void)thiz;
   return (jlong)PGProducedAudioFrames();
@@ -639,6 +650,7 @@ static JNINativeMethod g_methods[] = {
   {"nativeAudio",             "([SI)I",                                (void*)nativeAudio},
   {"nativeAudioBufferState", "()J",                                  (void*)nativeAudioBufferState},
   {"nativeAudioProducedFrames", "()J",                                (void*)nativeAudioProducedFrames},
+  {"nativeAudioReport",       "(Ljava/lang/String;)V",               (void*)nativeAudioReport},
   {"nativePauseMenuActive",   "()Z",                                  (void*)nativePauseMenuActive},
   {"nativeLastInputDevice",   "()I",                                  (void*)nativeLastInputDevice},
   {"nativeTouchContext",      "()I",                                  (void*)nativeTouchContext},
