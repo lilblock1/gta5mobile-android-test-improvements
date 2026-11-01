@@ -501,6 +501,13 @@ public final class EngineActivity extends Activity {
             long lastReport = startedAt;
             long lastProduced = nativeAudioProducedFrames() & 0xffffffffL;
             long lastWrittenFrames = 0;
+            // A ten-second mean hides severe one-second audio starvation,
+            // particularly during mission transitions and cutscenes.
+            long oneSecondAt = startedAt;
+            long oneSecondProduced = lastProduced;
+            long worstSecondProducedFps = Long.MAX_VALUE;
+            int sourceSlowSeconds = 0;
+            int sourceSampleSeconds = 0;
             long peakQueue = 0;
             while (audioThreadRunning && !Thread.currentThread().isInterrupted()) {
                 if (audioPaused) {
@@ -517,6 +524,22 @@ public final class EngineActivity extends Activity {
                 }
                 int available = NativeAudioBufferPolicy.boundedAvailable(state);
                 int capacity = NativeAudioBufferPolicy.ringCapacity(state);
+                if (now - oneSecondAt >= 1000) {
+                    long producedAt = nativeAudioProducedFrames() & 0xffffffffL;
+                    long newFrames = (producedAt - oneSecondProduced) & 0xffffffffL;
+                    long secondsElapsedMs = Math.max(1L, now - oneSecondAt);
+                    long rate = newFrames * 1000L / secondsElapsedMs;
+                    // Ignore startup/prebuffering when no audio playback has
+                    // begun. A low rate while running indicates a real mixer
+                    // shortage rather than an Android AudioTrack write issue.
+                    if (audioStarted) {
+                        worstSecondProducedFps = Math.min(worstSecondProducedFps, rate);
+                        sourceSampleSeconds++;
+                        if (rate < 46000) sourceSlowSeconds++;
+                    }
+                    oneSecondAt = now;
+                    oneSecondProduced = producedAt;
+                }
                 boolean priming = !audioStarted;
                 long played = 0;
                 if (!priming) {
@@ -613,6 +636,8 @@ public final class EngineActivity extends Activity {
                         + " AndroidUnderruns=" + track.getUnderrunCount()
                         + " shortWrites=" + shortWrites + " emptyReads=" + emptyReads
                         + " producerWaits=" + waitingCycles
+                        + " min1sProducedFps=" + (sourceSampleSeconds == 0 ? -1 : worstSecondProducedFps)
+                        + " slowProducerSeconds=" + sourceSlowSeconds + "/" + sourceSampleSeconds
                         + " (needs 48000 stereo frames/s)";
                     Log.i("NightlaneAudio", report);
                     try { nativeAudioReport(report); }
@@ -623,6 +648,8 @@ public final class EngineActivity extends Activity {
                     lastProduced = produced;
                     lastWrittenFrames = writtenFrames;
                     peakQueue = 0;
+                    worstSecondProducedFps = Long.MAX_VALUE;
+                    sourceSlowSeconds = sourceSampleSeconds = 0;
                     shortWrites = emptyReads = waitingCycles = 0;
                 }
             }
