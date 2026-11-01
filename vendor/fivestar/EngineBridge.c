@@ -305,7 +305,10 @@ static void nativeStart(JNIEnv *env, jobject thiz, jstring gameDir, jstring mani
   PGSetBackBufferSize(width, height);
   // Map requested FPS to the game's actual internal VSYNC mode (0,1,2).
   // Passing literal 24/30/42/60 was ignored by PGConfigureEngine.
-  const int nativeFrameMode = frameLimit <= 0 ? 0 : frameLimit <= 30 ? 2 : 1;
+  // Only the exact 30 FPS target uses the guest's 30 Hz pacing mode.
+  // 24/42 FPS rely on the Vulkan host cap with the guest's 60 Hz base mode,
+  // avoiding two competing clocks and keeping game timing predictable.
+  const int nativeFrameMode = frameLimit <= 0 ? 0 : frameLimit == 30 ? 2 : 1;
   PGConfigureEngine(qualityPointers, qualityCount, width, height, nativeFrameMode);
   LOGI("Native frame mapping: requested=%d fps, internal mode=%d", frameLimit, nativeFrameMode);
 
