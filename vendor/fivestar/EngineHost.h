@@ -57,4 +57,5 @@ void PGSetTargetingMode(int32_t mode);
 bool PGPauseMenuActive(void);
 uint32_t PGFillAudio(float *left, float *right, uint32_t count);
 uint32_t PGAvailableAudioFrames(uint32_t *capacity);
+uint32_t PGProducedAudioFrames(void);
 void PGGetAudioDiagnostics(uint64_t *underflow, uint64_t *overflow);
