@@ -1266,6 +1266,7 @@ pub struct Gpu {
     pipeline_disk: Option<PipelineCache>,
     pipeline_disk_path: Option<PathBuf>,
     pipeline_disk_last_save: Instant,
+    pipeline_last_compile_request: Instant,
     pipeline_disk_saved_creates: u64,
     pipeline_disk_write_busy: Arc<AtomicBool>,
     pipe_jobs: Option<std::sync::mpsc::Sender<(u64, PipeJob)>>,
@@ -1573,6 +1574,7 @@ impl Gpu {
             bgl_cache: HashMap::new(), empty_bgl: None, pipelines: HashMap::new(),
             pipeline_fifo: VecDeque::new(), pipeline_evictions: 0,
             pipeline_disk, pipeline_disk_path, pipeline_disk_last_save: Instant::now(),
+            pipeline_last_compile_request: Instant::now(),
             pipeline_disk_saved_creates: 0, pipeline_disk_write_busy,
             compute: HashMap::new(), bind_groups: FifoCache::new(BG_LIMIT),
             bg_dependents: HashMap::new(), view_dependents: HashMap::new(),
@@ -3339,6 +3341,7 @@ impl Gpu {
             None => {}
         }
         self.pipe_creates += 1;
+        self.pipeline_last_compile_request = Instant::now();
         let Some((job, vb_req)) = self.create_pipeline(vs, ps, layout, &strides, topo, strip_fmt, &pi) else {
             self.insert_pipeline(key, PipeEntry::Done(None));
             return None;
@@ -4455,6 +4458,11 @@ impl Gpu {
             || self.pipeline_disk_write_busy.load(Ordering::Relaxed)
             || self.pipe_creates < self.pipeline_disk_saved_creates.saturating_add(16)
             || self.pipeline_disk_last_save.elapsed() < Duration::from_secs(30)
+            // Shader-cache extraction may contend for the driver lock even
+            // when called on a background thread. Never serialize while a
+            // cutscene is requesting first-use pipelines or workers are busy.
+            || !self.pipe_pending.is_empty()
+            || self.pipeline_last_compile_request.elapsed() < Duration::from_secs(8)
         { return; }
         self.pipeline_disk_last_save = Instant::now();
         self.pipeline_disk_saved_creates = self.pipe_creates;
