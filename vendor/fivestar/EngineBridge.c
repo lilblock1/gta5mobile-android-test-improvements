@@ -268,12 +268,12 @@ static void nativeUpdatePad(JNIEnv *env, jobject thiz, jobjectArray keys,
     else if (!strcmp(key, "Space"))     { pad.buttons |= PAD_A; }   // jump / handbrake
     else if (!strcmp(key, "KeyF"))      { pad.buttons |= PAD_X; }   // enter vehicle
     else if (!strcmp(key, "ShiftLeft")) { pad.buttons |= PAD_L3; }  // sprint
-    else if (!strcmp(key, "ControlLeft")) { pad.buttons |= PAD_L1; }
-    else if (!strcmp(key, "Tab"))       { pad.buttons |= PAD_R1; }  // weapon wheel
-    else if (!strcmp(key, "KeyQ"))      { pad.buttons |= PAD_R3; }  // cover / radio
+    else if (!strcmp(key, "ControlLeft")) { pad.buttons |= PAD_L3; }
+    else if (!strcmp(key, "Tab"))       { pad.buttons |= PAD_L1; }  // weapon wheel
+    else if (!strcmp(key, "KeyQ"))      { pad.buttons |= PAD_R1; }  // cover / radio
     else if (!strcmp(key, "KeyC"))      { pad.buttons |= PAD_Y; }
-    else if (!strcmp(key, "KeyV"))      { pad.buttons |= PAD_B; }   // camera
-    else if (!strcmp(key, "KeyR"))      { pad.buttons |= PAD_X; }   // reload
+    else if (!strcmp(key, "KeyV"))      { pad.buttons |= PAD_SELECT; } // camera
+    else if (!strcmp(key, "KeyR"))      { pad.buttons |= PAD_B; }   // reload
     else if (!strcmp(key, "Escape"))    { pad.buttons |= PAD_START; }
     else if (!strcmp(key, "Enter"))     { pad.buttons |= PAD_A; }
     else if (!strcmp(key, "ArrowUp"))   { pad.buttons |= PAD_DPAD_UP; }
@@ -281,7 +281,7 @@ static void nativeUpdatePad(JNIEnv *env, jobject thiz, jobjectArray keys,
     else if (!strcmp(key, "ArrowLeft")) { pad.buttons |= PAD_DPAD_LEFT; }
     else if (!strcmp(key, "ArrowRight")){ pad.buttons |= PAD_DPAD_RIGHT; }
     else if (!strcmp(key, "Backspace")) { pad.buttons |= PAD_B; }
-    else if (!strcmp(key, "AltLeft"))   { pad.buttons |= PAD_SELECT; }
+    else if (!strcmp(key, "AltLeft"))   { pad.buttons |= PAD_DPAD_DOWN; } // character switch
 
     (*env)->ReleaseStringUTFChars(env, k, key);
   }
@@ -289,7 +289,7 @@ static void nativeUpdatePad(JNIEnv *env, jobject thiz, jobjectArray keys,
   // Touch-only bits.
   if (touchButtons & 1) pad.rightTrigger = 1.0f;                 // fire
   if (touchButtons & 2) pad.leftTrigger = 1.0f;                  // aim
-  if (touchButtons & 4) pad.buttons |= PAD_B;                    // brake
+  if (touchButtons & 4) pad.leftTrigger = 1.0f;                 // brake
   if (horn)              pad.buttons |= PAD_SELECT;              // horn -> select (vehicle)
 
   PGUpdateVirtualPad(pad);
