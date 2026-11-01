@@ -21,10 +21,13 @@ final class TouchControls extends View {
     // that JNI method is not linked into the renderer-only library.
     interface LookSink { void onLook(float dx, float dy); }
     private final LookSink lookSink;
+    private final boolean nativeRightStick;
     static final class Input {
         final HashSet<String> keys = new HashSet<>();
         int buttons;
         boolean horn;
+        // Screen-right and screen-down deflection, in [-1, 1].
+        float rightStickX, rightStickY;
     }
     private static final class Button {
         final float x, y, radius;
@@ -56,9 +59,19 @@ final class TouchControls extends View {
         this(context, lookSensitivity, GameActivity::nativeLook);
     }
     TouchControls(Context context, float lookSensitivity, LookSink lookSink) {
+        this(context, lookSensitivity, lookSink, false);
+    }
+    // Native ARM64 translates a held camera finger to a controller stick;
+    // legacy GameActivity continues receiving relative-look swipe events.
+    TouchControls(Context context, float lookSensitivity, boolean nativeRightStick) {
+        this(context, lookSensitivity, (dx, dy) -> {}, nativeRightStick);
+    }
+    private TouchControls(Context context, float lookSensitivity, LookSink lookSink,
+                          boolean nativeRightStick) {
         super(context);
         if (lookSink == null) throw new IllegalArgumentException("Touch look sink is required");
         this.lookSink = lookSink;
+        this.nativeRightStick = nativeRightStick;
         this.lookSensitivity = lookSensitivity;
         density = getResources().getDisplayMetrics().density;
         JSONObject config;
@@ -170,7 +183,7 @@ final class TouchControls extends View {
                 // Free-space swipes rotate the camera. Swiping while holding
                 // AIM or FIRE also steers the aim, so aiming/shooting doesn't
                 // monopolize the right thumb. The left stick stays independent.
-                if (grip.button == -1 || isAimDrag(grip))
+                if (!nativeRightStick && (grip.button == -1 || isAimDrag(grip)))
                     sendLook((x - grip.x) * 3 * lookSensitivity, (y - grip.y) * 3 * lookSensitivity);
                 grip.x = x; grip.y = y;
             }
@@ -225,8 +238,26 @@ final class TouchControls extends View {
                     double length = Math.hypot(dx, dy);
                     if (length > 10) {
                         float push = (float) (40 * lookSensitivity * Math.min((length - 10) / 45, 1) / length);
-                        sendLook(dx * push, dy * push);
+                        if (!nativeRightStick) sendLook(dx * push, dy * push);
                     }
+                }
+            }
+        }
+        if (nativeRightStick) {
+            Grip camera = null;
+            for (Grip grip : grips.values()) {
+                if (grip.button != -1 && !isAimDrag(grip)) continue;
+                // Prefer the rightmost camera finger when more than one is down.
+                if (camera == null || grip.startX > camera.startX) camera = grip;
+            }
+            if (camera != null) {
+                float dx = camera.x - camera.startX;
+                float dy = camera.y - camera.startY;
+                float length = (float) Math.hypot(dx, dy);
+                float amount = TouchLookPolicy.deflection(dx, dy, lookSensitivity);
+                if (length > 0f) {
+                    input.rightStickX = dx / length * amount;
+                    input.rightStickY = dy / length * amount;
                 }
             }
         }
