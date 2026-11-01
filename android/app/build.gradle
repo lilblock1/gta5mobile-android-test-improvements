@@ -1,6 +1,13 @@
 plugins { id 'com.android.application' }
 
+// Native-only artifacts embed compiled ARM64 code. Preserve the full, pinned
+// game.wasm in the source bundle for future recompilation, but do not install a
+// second copy of the runtime into the APK or onto the user's phone.
+def nativeOnlyBuild = project.hasProperty('nativeRendererOnly') &&
+    project.property('nativeRendererOnly').toString().toBoolean()
+
 android {
+    buildFeatures { buildConfig true }
     namespace 'dev.muguet'
     compileSdk 36
     ndkVersion '28.2.13676358'
@@ -12,6 +19,7 @@ android {
         targetSdk 36
         versionCode 15
         versionName '0.2.0-native-settings-repair'
+        buildConfigField 'boolean', 'NATIVE_ONLY', nativeOnlyBuild ? 'true' : 'false'
         ndk { abiFilters 'arm64-v8a' }
     }
     compileOptions {
@@ -64,24 +72,27 @@ if (engineArchivePath) {
     def generatedAssets = layout.buildDirectory.dir('generated/reference-engine-assets')
     tasks.register('prepareReferenceEngineAssets', Sync) {
         from(zipTree(referenceApk)) {
-            include 'assets/b/8b0b5899ed/game.wasm', 'assets/b/8b0b5899ed/shaders/**'
+            include 'assets/b/8b0b5899ed/shaders/**'
+            if (!nativeOnlyBuild) include 'assets/b/8b0b5899ed/game.wasm'
             eachFile { details -> details.path = details.path.substring('assets/'.length()) }
             includeEmptyDirs = false
         }
         into generatedAssets
         doLast {
-            def wasm = new File(generatedAssets.get().asFile, 'b/8b0b5899ed/game.wasm')
-            if (!wasm.isFile()) throw new GradleException('Reference APK has no matching engine resources')
             if (!new File(generatedAssets.get().asFile, 'b/8b0b5899ed/shaders/index.json').isFile())
                 throw new GradleException('Reference APK has no matching shader index')
-            def hash = java.security.MessageDigest.getInstance('SHA-256')
-            wasm.withInputStream { stream ->
-                byte[] buffer = new byte[131072]
-                int count
-                while ((count = stream.read(buffer)) != -1) hash.update(buffer, 0, count)
+            if (!nativeOnlyBuild) {
+                def wasm = new File(generatedAssets.get().asFile, 'b/8b0b5899ed/game.wasm')
+                if (!wasm.isFile()) throw new GradleException('Reference APK has no matching engine resources')
+                def hash = java.security.MessageDigest.getInstance('SHA-256')
+                wasm.withInputStream { stream ->
+                    byte[] buffer = new byte[131072]
+                    int count
+                    while ((count = stream.read(buffer)) != -1) hash.update(buffer, 0, count)
+                }
+                if (hash.digest().encodeHex().toString() != '11ca8d2c04c5e843d18ff4aea4899d72c86973c6b031df334e67c446b2ae83e0')
+                    throw new GradleException('Reference engine hash does not match supported build')
             }
-            if (hash.digest().encodeHex().toString() != '11ca8d2c04c5e843d18ff4aea4899d72c86973c6b031df334e67c446b2ae83e0')
-                throw new GradleException('Reference engine hash does not match supported build')
         }
     }
     android.sourceSets.main.assets.srcDir(generatedAssets)

@@ -153,14 +153,17 @@ def prepare(directory, output):
             temporary.unlink(missing_ok=True)
 
 
-def verify_apk(apk, resources):
+def verify_apk(apk, resources, native_only=False):
     with zipfile.ZipFile(apk) as built, zipfile.ZipFile(resources) as expected:
-        wanted = expected.namelist()
-        if len(wanted) != len(set(wanted)) or ENGINE not in wanted or INDEX not in wanted:
+        all_verified = expected.namelist()
+        if len(all_verified) != len(set(all_verified)) or ENGINE not in all_verified or INDEX not in all_verified:
             raise ValueError("Invalid prepared resource ZIP")
+        wanted = [name for name in all_verified if not (native_only and name == ENGINE)]
         actual = [name for name in built.namelist() if name.startswith(PREFIX) and not name.endswith("/")]
         if len(actual) != len(set(actual)) or set(actual) != set(wanted):
             raise ValueError("APK is missing engine/shader resources or contains duplicates")
+        if native_only and "lib/arm64-v8a/libgta5engine.so" not in built.namelist():
+            raise ValueError("Native-only APK missing compiled ARM64 game engine")
         for name in wanted:
             if not allowed(name):
                 raise ValueError("Invalid resource path")
@@ -171,7 +174,7 @@ def verify_apk(apk, resources):
                         raise ValueError(f"APK resource differs from verified bundle: {name}")
                     if not a:
                         break
-        if hashlib.sha256(built.read(ENGINE)).hexdigest() != ENGINE_SHA256:
+        if not native_only and hashlib.sha256(built.read(ENGINE)).hexdigest() != ENGINE_SHA256:
             raise ValueError("APK engine hash mismatch")
         return len(wanted)
 
@@ -188,6 +191,8 @@ def main():
     verify = commands.add_parser("verify-apk")
     verify.add_argument("--apk", required=True, type=Path)
     verify.add_argument("--resources", required=True, type=Path)
+    verify.add_argument("--native-only", action="store_true",
+                        help="Require libgta5engine.so and shaders; omit duplicate game.wasm")
     args = parser.parse_args()
     if args.command == "pack":
         result = package(args.apk, args.bundle)
@@ -195,7 +200,7 @@ def main():
     elif args.command == "prepare":
         print(f"Prepared {prepare(args.bundle, args.output)} verified engine/shader resources")
     else:
-        print(f"Verified {verify_apk(args.apk, args.resources)} packaged APK resources")
+        print(f"Verified {verify_apk(args.apk, args.resources, native_only=args.native_only)} packaged APK resources")
 
 
 if __name__ == "__main__":

@@ -69,6 +69,22 @@ class EngineResourcesTest(unittest.TestCase):
         with zipfile.ZipFile(output) as archive:
             self.assertEqual(archive.read(resources.ENGINE), self.engine)
 
+    def test_native_only_apk_excludes_duplicate_wasm_and_requires_compiled_core(self):
+        directory, _ = self.bundle()
+        expected = self.root / "ready.zip"
+        resources.prepare(directory, expected)
+        apk = self.root / "native.apk"
+        with zipfile.ZipFile(apk, "w") as out:
+            out.writestr(resources.INDEX, self.index)
+            out.writestr("lib/arm64-v8a/libgta5engine.so", b"native test fixture")
+        self.assertEqual(resources.verify_apk(apk, expected, native_only=True), 1)
+        with self.assertRaisesRegex(ValueError, "missing"):
+            resources.verify_apk(apk, expected)
+        with zipfile.ZipFile(apk, "w") as out:
+            out.writestr(resources.INDEX, self.index)
+        with self.assertRaisesRegex(ValueError, "ARM64 game engine"):
+            resources.verify_apk(apk, expected, native_only=True)
+
     def test_reassembles_multiple_ordered_parts(self):
         with patch.object(resources, "BLOCK", 512):
             directory, manifest = self.bundle([(resources.PREFIX + "shaders/large.bin", random.Random(7).randbytes(8192))])

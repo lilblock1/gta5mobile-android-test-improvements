@@ -314,8 +314,13 @@ final class GameDataInstaller {
 
     private void validateEngine(File root) throws Exception {
         File build = new File(root, "b/" + BUILD);
-        if (!new File(build, "shaders/index.json").isFile() || !WASM_SHA256.equals(digest(new File(build, "game.wasm")) ))
-            throw new IOException("Matching engine resources are missing. Import your compatible game ZIP or use a build with engine resources.");
+        if (!new File(build, "shaders/index.json").isFile())
+            throw new IOException("Matching game shaders are missing. Install the complete Nightlane APK.");
+        // A native-only build executes the already compiled, hash-pinned
+        // libgta5engine.so, so copying game.wasm into private game storage
+        // needlessly consumes another ~200 MB. The legacy JIT still requires it.
+        if (!BuildConfig.NATIVE_ONLY && !WASM_SHA256.equals(digest(new File(build, "game.wasm"))))
+            throw new IOException("Matching legacy WASM engine resources are missing.");
     }
 
     private String digest(File file) throws Exception {

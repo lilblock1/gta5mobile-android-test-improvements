@@ -277,7 +277,7 @@ public final class LauncherActivity extends Activity {
         subtitle.setTextColor(0xFF70D8FF);
         column.addView(subtitle);
         TextView warning = new TextView(this);
-        warning.setText("ARM64 / Android 10+ / Vulkan. A high-end phone with 8–12 GB RAM is recommended, not a guarantee of compatibility. Supply your own web-port data: import a ZIP, or point the app at a folder that already holds data/ and b/<build>/ with game.wasm and shaders inside. A normal PC installation is not enough. This test APK uses compiled native ARM64 game code; playability is not yet verified.");
+        warning.setText("ARM64 / Android 10+ / Vulkan. A high-end phone with 8–12 GB RAM is recommended, not a guarantee of compatibility. Supply your compatible game data via import or the HTTPS installer. Native-only builds use compiled ARM64 game code and shader resources; the old game.wasm is not needed on the phone. A normal PC installation is not enough. This test APK uses compiled native ARM64 game code; playability is not yet verified.");
         column.addView(warning);
         status = new TextView(this);
         column.addView(status);

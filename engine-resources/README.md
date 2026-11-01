@@ -38,3 +38,17 @@ python3 tools/engine_resources.py verify-apk \
 The first-Play installer copies the bundled engine/shaders into private storage,
 then downloads and verifies the separate data archives. Keep the launcher open;
 its Pause button retains progress. Existing imported data and saves are preserved.
+
+
+## Native-only APK packaging
+
+The prepared source ZIP retains the exact pinned game.wasm for reproducible
+wasm2c compilation and the legacy JIT. When Gradle is invoked with
+`-PnativeRendererOnly=true`, only the shaders are installed as Android assets:
+the compiled `libgta5engine.so` already contains the game code. The original
+HTTPS installer still downloads and SHA-256 verifies data archives but skips
+copying a redundant WASM module to private app storage.
+
+Verify the result with
+`python3 tools/engine_resources.py verify-apk --native-only --apk app.apk --resources prepared.zip`.
+Non-native builds continue packaging and verifying game.wasm unchanged.
