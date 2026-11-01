@@ -557,7 +557,7 @@ public final class LauncherActivity extends Activity {
         column.addView(sensitivity);
         play = new Button(this);
         play.setText("Play — native ARM64 (experimental)");
-        play.setOnClickListener(v -> launch(EngineActivity.class));
+        play.setOnClickListener(v -> playNative());
         pauseDownload = new Button(this);
         pauseDownload.setText("Pause download");
         pauseDownload.setVisibility(android.view.View.GONE);
@@ -705,6 +705,67 @@ public final class LauncherActivity extends Activity {
         }
     }
 
+    // Never turn the Play button into an inert control: report missing files or
+    // native initialization problems on screen, and preserve the old first-Play
+    // HTTPS download path for devices without game data.
+    private void playNative() {
+        if (importing) {
+            status.setText("Game files are downloading or importing. Finish setup before playing.");
+            return;
+        }
+        status.setText("Checking game files and native engine…");
+        if (!nativeLoaded.get()) {
+            Exception failed = nativeFailure.get();
+            if (failed != null) {
+                status.setText("Native renderer failed to load. See the error dialog or Export logs in Library.");
+                error(failed);
+            } else {
+                status.setText("Native renderer is still loading. Try Play again once initialization completes.");
+                ensureNative();
+            }
+            return;
+        }
+        if (!engineLibraryPresent()) {
+            status.setText("Native ARM64 game engine is missing from this APK.");
+            error(new IllegalStateException("libgta5engine.so missing. Install the complete native-only APK."));
+            return;
+        }
+        try {
+            String folder = folderPath();
+            if (folder == null) {
+                status.setText("The selected game folder cannot be read.");
+                new AlertDialog.Builder(this)
+                    .setTitle("Game folder unavailable")
+                    .setMessage("The selected game folder is unreadable. Choose a different folder in Library, or download a copy into app storage.")
+                    .setNegativeButton("Cancel", null)
+                    .setPositiveButton("Download game files", (dialog, which) -> downloadGameFiles())
+                    .show();
+                return;
+            }
+            if (!nativePrepare(getFilesDir().getAbsolutePath())) {
+                if (folder.isEmpty()) {
+                    status.setText("Game data is not installed. Starting the original HTTPS installer…");
+                    downloadGameFiles();
+                } else {
+                    status.setText("Selected folder has incomplete game resources.");
+                    new AlertDialog.Builder(this)
+                        .setTitle("Game data incomplete")
+                        .setMessage("The selected folder is missing required game resources. Choose a compatible folder in Library, or download to app storage.")
+                        .setNegativeButton("Cancel", null)
+                        .setPositiveButton("Download game files", (dialog, which) -> downloadGameFiles())
+                        .show();
+                }
+                return;
+            }
+            status.setText("Launching native ARM64 engine…");
+            launch(EngineActivity.class);
+        } catch (Throwable t) {
+            android.util.Log.e("Nightlane", "Play button failed", t);
+            status.setText("Play failed: " + t);
+            error(new IllegalStateException("Play could not start: " + t, t));
+        }
+    }
+
     // Persist the chosen settings, then start the requested game activity.
     private void launch(Class<?> activity) {
         // The proxy is initialized and verified in the isolated game process.
@@ -789,8 +850,15 @@ public final class LauncherActivity extends Activity {
             } catch (IOException logError) {
                 android.util.Log.w("Nightlane", "Unable to record backend launch", logError);
             }
+            // A failed isolated :engine process will leave a diagnostic that the
+            // launcher shows after returning, even when it crashes immediately.
+            new File(getFilesDir(), "nightlane-last-launch-error.txt").delete();
             startActivity(new Intent(this, activity));
-        } catch (Exception e) { error(e); }
+        } catch (Throwable t) {
+            android.util.Log.e("Nightlane", "Native activity could not launch", t);
+            status.setText("Cannot launch native game: " + t);
+            error(new IllegalStateException("Cannot launch native game: " + t, t));
+        }
     }
 
     // Opens a link with whatever browser the phone has. Devices without a
@@ -837,14 +905,17 @@ public final class LauncherActivity extends Activity {
         });
     }
     private void ready() {
-        if (importing) { play.setEnabled(false); playEngine.setEnabled(false); downloadGameButton.setEnabled(false); return; }
+        if (importing) { play.setEnabled(true); playEngine.setEnabled(false); downloadGameButton.setEnabled(false); return; }
         // Not ready yet: the load is in flight, and its result calls back into here.
         if (!nativeLoaded.get()) {
-            play.setEnabled(false); playEngine.setEnabled(false);
-            // Downloads must remain available even when renderer JNI fails to load.
+            play.setEnabled(true); playEngine.setEnabled(false);
             downloadGameButton.setEnabled(true);
-            if (nativeFailure.get() != null) return; // already reported
-            status.setText("Loading the game library…");
+            // The button itself explains the failure rather than silently ignoring taps.
+            if (nativeFailure.get() != null) {
+                status.setText("Renderer initialization failed. Tap Play for details; downloading remains available.");
+                return;
+            }
+            status.setText("Loading native renderer… Tap Play for progress.");
             ensureNative();
             return;
         }
@@ -857,7 +928,7 @@ public final class LauncherActivity extends Activity {
                     : "No game data yet. Import a ZIP, or pick a folder that holds data/ and b/.");
                 clearFolderButton.setVisibility(pickedSomething ? android.view.View.VISIBLE : android.view.View.GONE);
                 grantAccessButton.setVisibility(pickedSomething && !hasAllFilesAccess() ? android.view.View.VISIBLE : android.view.View.GONE);
-                play.setEnabled(false); playEngine.setEnabled(false);
+                play.setEnabled(true); playEngine.setEnabled(false);
                 downloadGameButton.setEnabled(true);
                 downloadGameButton.setVisibility(android.view.View.VISIBLE);
                 status.setText(pickedSomething ? "External game folder unreadable. Download an app-local copy or choose another folder in Library." : "Tap Download game files to install the original HTTPS chunks.");
@@ -876,8 +947,9 @@ public final class LauncherActivity extends Activity {
                 }
             }
             boolean ready = nativePrepare(getFilesDir().getAbsolutePath());
-            boolean canPlay = ready || folder.isEmpty();
-            play.setEnabled(canPlay);
+            // Keep Play actionable even if files are missing: it starts the
+            // original download or offers an explicit error instead of doing nothing.
+            play.setEnabled(true);
             playEngine.setEnabled(ready);
             // Keep a working download control even with an invalid external folder.
             // Unlike Play, it does not depend on nativePrepare() or nativeLoaded.
@@ -887,7 +959,7 @@ public final class LauncherActivity extends Activity {
             status.setText(ready ? "Game data ready."
                 : folder.isEmpty() ? "Tap Download game files (HTTPS), or import your existing files. Keep the app open during setup."
                 : "Selected game folder is incomplete. In Library, clear the selected folder to download.");
-        } catch (Exception e) { play.setEnabled(false); playEngine.setEnabled(false); error(e); }
+        } catch (Exception e) { play.setEnabled(true); playEngine.setEnabled(false); error(e); }
     }
 
     // The original installer ran on the first Play: the same GameDataInstaller
@@ -925,7 +997,7 @@ public final class LauncherActivity extends Activity {
         if (importing) return;
         importing = downloading = true;
         cancelDownload.set(false);
-        play.setEnabled(false); playEngine.setEnabled(false); downloadGameButton.setEnabled(false); importButton.setEnabled(false);
+        play.setEnabled(true); playEngine.setEnabled(false); downloadGameButton.setEnabled(false); importButton.setEnabled(false);
         pauseDownload.setEnabled(true); pauseDownload.setVisibility(android.view.View.VISIBLE);
         progress.setIndeterminate(true);
         getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -1423,13 +1495,32 @@ public final class LauncherActivity extends Activity {
             });
         });
     }
+    // Errors from :engine are written before returning to the launcher because
+    // Java exceptions in another Android process cannot be caught here directly.
+    private void showLastLaunchError() {
+        File report = new File(getFilesDir(), "nightlane-last-launch-error.txt");
+        if (!report.isFile()) return;
+        try {
+            String details = new String(Files.readAllBytes(report.toPath()), StandardCharsets.UTF_8);
+            report.delete();
+            if (details.length() > 1200) details = details.substring(0, 1200);
+            status.setText("Native startup failed: " + details);
+            new AlertDialog.Builder(this)
+                .setTitle("Native engine startup failed")
+                .setMessage(details + "\\n\\nUse Export logs in Library to share diagnostics.")
+                .setPositiveButton("OK", null)
+                .show();
+        } catch (Exception e) {
+            android.util.Log.e("Nightlane", "Could not read engine startup diagnostics", e);
+        }
+    }
     @Override protected void onResume() {
         super.onResume();
-        // Returning from the All-files settings screen has to re-test the folder.
-        // The first resume follows onCreate, which already asked for the same check,
-        // and repeating it re-walks the game folder for nothing.
-        if (settings != null && firstResume) { firstResume = false; return; }
-        if (settings != null) ready();
+        if (settings != null) {
+            if (firstResume) firstResume = false;
+            else ready();
+            showLastLaunchError();
+        }
     }
     @Override protected void onDestroy() {
         if (downloading) cancelDownload.set(true);

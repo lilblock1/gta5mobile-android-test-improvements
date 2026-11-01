@@ -34,12 +34,9 @@ import org.json.JSONObject;
 // headless graphics stub it will boot and run its non-graphics subsystems but
 // not render; that is the expected state until the Vulkan renderer lands.
 public final class EngineActivity extends Activity {
-    static {
-        // The renderer lives in the Rust library: the engine core resolves it
-        // at runtime, so it has to be in the process before the engine boots.
-        System.loadLibrary("muguet");
-    }
-
+    // Load the renderer under a try/catch in loadEngineCore(), not during class
+    // initialization. A missing library must produce a visible error, not an
+    // Activity that opens and immediately closes.
     // JNI (registered natively via RegisterNatives).
     private static native void nativeMemoryPressure(int level);
     private static native void nativeThermalLevel(int status);
@@ -163,8 +160,14 @@ public final class EngineActivity extends Activity {
         setContentView(root);
 
         if (!loadEngineCore()) {
-            status.setText("This build has no functional native engine core (libgta5engine.so).");
-            finish();
+            setStatus("Native engine library failed. Return to the launcher for details and Export logs.");
+            android.widget.Button back = new android.widget.Button(this);
+            back.setText("Return to launcher");
+            back.setOnClickListener(v -> finish());
+            FrameLayout.LayoutParams controls = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                android.view.Gravity.BOTTOM | android.view.Gravity.CENTER_HORIZONTAL);
+            root.addView(back, controls);
             return;
         }
         engineCoreLoaded = true;
@@ -177,14 +180,26 @@ public final class EngineActivity extends Activity {
     // there, and that must not take the app down with an UnsatisfiedLinkError.
     private boolean loadEngineCore() {
         try {
+            System.loadLibrary("muguet");
             System.loadLibrary("gta5engine");
             int registration = nativeRegister();
             if (registration != 0) throw new IllegalStateException(
                 "native JNI method registration failed: " + registration);
             return true;
         } catch (Throwable t) {
-            Log.e("Muguet", "native engine core not available: " + t);
+            Log.e("Muguet", "native engine core not available", t);
+            reportStartupFailure("Native library load/registration failed: " + t);
             return false;
+        }
+    }
+
+    private void reportStartupFailure(String message) {
+        Log.e("NightlaneEngine", message);
+        try {
+            Files.write(new File(getFilesDir(), "nightlane-last-launch-error.txt").toPath(),
+                message.getBytes(StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            Log.e("NightlaneEngine", "Could not save startup error", e);
         }
     }
 
@@ -213,6 +228,7 @@ public final class EngineActivity extends Activity {
             File manifest = new File(gameDir, "data/manifest.json");
             if (!manifest.isFile()) {
                 setStatus("Game files missing. Return to the launcher and install the game first.");
+                reportStartupFailure("Missing game manifest: " + manifest.getAbsolutePath());
                 return;
             }
             int[] size = displaySize();
@@ -224,8 +240,9 @@ public final class EngineActivity extends Activity {
             if (!muted) startAudio();
             running = true;
             handler.post(tick);
-        } catch (Exception e) {
-            setStatus("Startup failed: " + e.getMessage());
+        } catch (Throwable t) {
+            setStatus("Startup failed: " + t);
+            reportStartupFailure("Native engine initialization failed: " + t);
         }
     }
 
