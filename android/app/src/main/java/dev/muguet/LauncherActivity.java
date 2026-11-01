@@ -185,7 +185,7 @@ public final class LauncherActivity extends Activity {
     private boolean firstResume = true;
     private TextView status;
     private TextView savesStatus;
-    private Button play, playEngine, importButton, clearFolderButton, grantAccessButton;
+    private Button play, playEngine, importButton, clearFolderButton, grantAccessButton, downloadGameButton;
     private TextView folderStatus;
     private ProgressBar progress;
     private Spinner mode, heap, streamingBudget, worldstreamMode, msaaMode, frameQueue;
@@ -568,6 +568,31 @@ public final class LauncherActivity extends Activity {
         });
         column.addView(pauseDownload);
         column.addView(play);
+        // Keep the game-data downloader visible on the native-only Play page.
+        // The same verified HTTPS manifest downloader remains in GameDataInstaller.
+        downloadGameButton = new Button(this);
+        downloadGameButton.setText("Download game files (HTTPS)");
+        downloadGameButton.setOnClickListener(v -> {
+            if (importing) return;
+            try {
+                String selected = folderPath();
+                if (selected == null) {
+                    status.setText("Selected folder is unreadable. In Library, choose Go back to the imported copy before downloading.");
+                    return;
+                }
+                if (!selected.isEmpty()) {
+                    status.setText("A game folder is selected. In Library, choose Go back to the imported copy to download instead.");
+                    return;
+                }
+                if (nativePrepare(getFilesDir().getAbsolutePath())) {
+                    status.setText("Game data is already installed.");
+                    ready();
+                    return;
+                }
+                installOnFirstPlay(EngineActivity.class);
+            } catch (Exception e) { error(e); }
+        });
+        column.addView(downloadGameButton);
         playEngine = new Button(this);
         playEngine.setText("TEST NATIVE ARM64 (wasm2c) • experimental");
         playEngine.setOnClickListener(v -> new AlertDialog.Builder(this)
@@ -830,10 +855,10 @@ public final class LauncherActivity extends Activity {
         });
     }
     private void ready() {
-        if (importing) { play.setEnabled(false); playEngine.setEnabled(false); return; }
+        if (importing) { play.setEnabled(false); playEngine.setEnabled(false); downloadGameButton.setEnabled(false); return; }
         // Not ready yet: the load is in flight, and its result calls back into here.
         if (!nativeLoaded.get()) {
-            play.setEnabled(false); playEngine.setEnabled(false);
+            play.setEnabled(false); playEngine.setEnabled(false); downloadGameButton.setEnabled(false);
             if (nativeFailure.get() != null) return; // already reported
             status.setText("Loading the game library…");
             ensureNative();
@@ -849,7 +874,9 @@ public final class LauncherActivity extends Activity {
                 clearFolderButton.setVisibility(pickedSomething ? android.view.View.VISIBLE : android.view.View.GONE);
                 grantAccessButton.setVisibility(pickedSomething && !hasAllFilesAccess() ? android.view.View.VISIBLE : android.view.View.GONE);
                 play.setEnabled(false); playEngine.setEnabled(false);
-                status.setText(pickedSomething ? "Game folder not readable." : "Import game data to begin.");
+                downloadGameButton.setEnabled(false);
+                downloadGameButton.setVisibility(android.view.View.VISIBLE);
+                status.setText(pickedSomething ? "Game folder not readable. In Library, clear the selected folder before downloading." : "Import game data to begin.");
                 return;
             }
             grantAccessButton.setVisibility(android.view.View.GONE);
@@ -868,8 +895,12 @@ public final class LauncherActivity extends Activity {
             boolean canPlay = ready || folder.isEmpty();
             play.setEnabled(canPlay);
             playEngine.setEnabled(ready);
+            downloadGameButton.setVisibility(ready ? android.view.View.GONE : android.view.View.VISIBLE);
+            downloadGameButton.setEnabled(!ready && folder.isEmpty());
             play.setText(ready ? "Play — native ARM64 (experimental)" : "Play — download game data");
-            status.setText(ready ? "Game data ready." : "Tap Play to download game data, or import your existing files. Keep the app open during setup.");
+            status.setText(ready ? "Game data ready."
+                : folder.isEmpty() ? "Tap Download game files (HTTPS), or import your existing files. Keep the app open during setup."
+                : "Selected game folder is incomplete. In Library, clear the selected folder to download.");
         } catch (Exception e) { play.setEnabled(false); playEngine.setEnabled(false); error(e); }
     }
 
@@ -877,7 +908,7 @@ public final class LauncherActivity extends Activity {
         if (importing) return;
         importing = downloading = true;
         cancelDownload.set(false);
-        play.setEnabled(false); playEngine.setEnabled(false); importButton.setEnabled(false);
+        play.setEnabled(false); playEngine.setEnabled(false); downloadGameButton.setEnabled(false); importButton.setEnabled(false);
         pauseDownload.setEnabled(true); pauseDownload.setVisibility(android.view.View.VISIBLE);
         progress.setIndeterminate(true);
         getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);

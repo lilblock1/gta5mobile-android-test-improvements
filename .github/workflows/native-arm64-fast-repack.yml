@@ -1,0 +1,98 @@
+name: Nightlane native-only fast launcher repack
+
+# Repackage the previously compiled engine. The full native build is still
+# available manually using native-arm64-experiment.yml workflow_dispatch.
+on:
+  push:
+    branches: [experimental/native-only-renderer]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: nightlane-native-fast-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repack:
+    name: Reuse native ARM64 engine and rebuild Android launcher only
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      ENGINE_ZIP: /tmp/nightlane-engine-resources.zip
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Verify downloader and fast-repack policy
+        run: |
+          python3 -m unittest discover -s tools/tests -v
+          python3 tools/engine_resources.py prepare --output "$ENGINE_ZIP"
+
+      - name: Download pinned, successfully compiled native-only APK
+        uses: actions/download-artifact@v4
+        with:
+          name: Nightlane-ARM64-NATIVE-ONLY-EXPERIMENTAL
+          run-id: 41262147135
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: /tmp/nightlane-base-apk
+
+      - name: Verify and reuse unchanged native ARM64 libraries
+        run: |
+          python3 tools/reuse_native_libraries.py \
+            --source /tmp/nightlane-base-apk/app-debug.apk \
+            --destination android/app/src/main/jniLibs/arm64-v8a
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install Android SDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-36' 'build-tools;36.0.0'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Restore repeatable APK signing if configured
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE" ]; then
+            printf '%s' "$KEYSTORE" | base64 -d > "$RUNNER_TEMP/native-keystore.jks"
+            echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/native-keystore.jks" >> "$GITHUB_ENV"
+          else
+            echo "::warning::No signing secret; a new debug signing key may prevent in-place updates. Back up saves."
+          fi
+
+      - name: Build Java UI and repackage prebuilt native libraries (no engine compile)
+        run: >-
+          gradle -p android testDebugUnitTest assembleDebug
+          -x :app:buildRust
+          "-PengineResourcesZip=$ENGINE_ZIP"
+          --no-daemon --max-workers=2 --stacktrace
+
+      - name: Verify native libraries are identical and assets intact
+        run: |
+          python3 tools/reuse_native_libraries.py \
+            --source android/app/build/outputs/apk/debug/app-debug.apk \
+            --destination /tmp/nightlane-verified-output
+          python3 tools/engine_resources.py verify-apk \
+            --apk android/app/build/outputs/apk/debug/app-debug.apk \
+            --resources "$ENGINE_ZIP"
+
+      - name: Publish APK with restored game-data download control
+        uses: actions/upload-artifact@v5
+        with:
+          name: Nightlane-ARM64-NATIVE-ONLY-DOWNLOAD-FIX
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Summary
+        run: |
+          echo '### Launcher-only native APK repack' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Restored HTTPS download button; native engine and Vulkan renderer reused byte-for-byte.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Experimental engine requires real-device testing.' >> "$GITHUB_STEP_SUMMARY"

@@ -4,7 +4,7 @@ name: Nightlane native ARM64 only (wasm2c + Vulkan renderer)
 # A successful APK build does not prove native gameplay.
 on:
   push:
-    branches: [experimental/native-arm64-dual-runtime, fix/native-futex-startup-diagnostics, experimental/native-only-renderer]
+    branches: [experimental/native-arm64-dual-runtime, fix/native-futex-startup-diagnostics]
   workflow_dispatch:
 
 permissions:
