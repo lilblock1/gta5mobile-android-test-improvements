@@ -1508,7 +1508,7 @@ impl Gpu {
             evicted_buffers: 0, restored_buffers: 0, eviction_last_scan_frame: 0,
             eviction_pending: VecDeque::new(), eviction_scan_count: 0, eviction_scan_max_ns: 0,
             readback_pool: Vec::new(),
-            readback_pool_enabled: std::env::var("NIGHTLANE_READBACK_REUSE").as_deref() != Ok("0"),
+            readback_pool_enabled: std::env::var("NIGHTLANE_READBACK_REUSE").map_or(true, |value| value != "0"),
             readback_pool_hits: 0, readback_pool_misses: 0,
             readback_completions: 0, readback_max_wait_ns: 0, readback_slow_50ms: 0,
             hud_last_sample: Instant::now(),
