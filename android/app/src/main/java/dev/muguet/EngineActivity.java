@@ -389,6 +389,10 @@ public final class EngineActivity extends Activity {
         // This is an OS cache hint, not a speculative user-data download.
         vars.add("PG_HTTPFS_READAHEAD_KB=" +
             (cfg.optBoolean("nightlane_read_ahead", true) ? "64" : "0"));
+        // Revert to allocating a new staging buffer on each GPU readback
+        // without changing correctness or requiring an APK rebuild.
+        vars.add("NIGHTLANE_READBACK_REUSE=" +
+            (cfg.optBoolean("nightlane_readback_reuse", true) ? "1" : "0"));
         int pipelines = cfg.optInt("nightlane_pipeline_workers", 2);
         vars.add("NIGHTLANE_PIPELINE_WORKERS=" +
             (pipelines == 1 || pipelines == 4 ? pipelines : 2));
