@@ -170,6 +170,7 @@ public final class LauncherActivity extends Activity {
     private boolean loadingGraphics;
 
     private static native boolean nativePrepare(String directory);
+    private static native boolean nativeShaderValidate(String wgslSource);
     private native void nativeImport(String archive);
     // Returns the folder inside the picked one that holds the game (data/ and
     // b/), or null when there is none.
@@ -180,6 +181,7 @@ public final class LauncherActivity extends Activity {
     // immediately, and every native call waits for the load to finish. The worker is
     // single-threaded, so a later import is still queued behind this one.
     private final AtomicBoolean loadingNative = new AtomicBoolean();
+    private final AtomicBoolean warmingNative = new AtomicBoolean();
     private final AtomicBoolean nativeLoaded = new AtomicBoolean();
     private final AtomicReference<Exception> nativeFailure = new AtomicReference<>();
     private boolean firstResume = true;
@@ -190,7 +192,7 @@ public final class LauncherActivity extends Activity {
     private ProgressBar progress;
     private Spinner mode, heap, streamingBudget, worldstreamMode, msaaMode, frameQueue, nativeCpuWorkers, pipelineWorkers;
     private Spinner nightlanePresent, nightlaneSharpness, nightlaneLod, nightlaneHudSize, nightlaneHudOpacity;
-    private CheckBox nightlaneThermal, nightlaneCompactHud, touchFreeAim, automaticHeap, readAhead, readbackReuse, shadowFix;
+    private CheckBox nightlaneThermal, nightlaneCompactHud, touchFreeAim, automaticHeap, readAhead, readbackReuse, prelaunchWarmup, shadowFix;
     private static final double[] STREAMING_BUDGETS = {0.35, 0.25, 0.15};
     private EditText scale, name, magnetField, relayUrl, relayRoom, relayKey;
     private CheckBox mute, multiplayer, cpuBc, softwareClip;
@@ -461,6 +463,8 @@ public final class LauncherActivity extends Activity {
             settings.optBoolean("nightlane_read_ahead", true));
         readbackReuse = check(column, "Reuse completed Vulkan readback buffers (experimental; safe off switch)",
             settings.optBoolean("nightlane_readback_reuse", true));
+        prelaunchWarmup = check(column, "Prepare shaders and pre-cache nearby game assets before Play (progress bar; skippable)",
+            settings.optBoolean("nightlane_prelaunch_warmup", true));
         String queueMode = settings.optString("nightlane_frame_queue", "low_latency");
         frameQueue = choice(column, "Frame queue (restart game to apply)",
             new String[]{"Original — 3 frames", "Lower latency — 2 frames", "Minimum latency — 1 frame (may reduce FPS)"},
@@ -812,6 +816,7 @@ public final class LauncherActivity extends Activity {
             settings.put("nightlane_native_render_scale", Math.max(0.50, renderScale));
             settings.put("nightlane_read_ahead", readAhead.isChecked());
             settings.put("nightlane_readback_reuse", readbackReuse.isChecked());
+            settings.put("nightlane_prelaunch_warmup", prelaunchWarmup.isChecked());
             settings.put("nightlane_shadow_fix", shadowFix.isChecked());
             settings.put("nightlane_frame_queue", new String[]{"original", "low_latency", "minimal"}[frameQueue.getSelectedItemPosition()]);
             settings.put("streamer_percentage", STREAMING_BUDGETS[streamingBudget.getSelectedItemPosition()]);
@@ -874,12 +879,89 @@ public final class LauncherActivity extends Activity {
             // A failed isolated :engine process will leave a diagnostic that the
             // launcher shows after returning, even when it crashes immediately.
             new File(getFilesDir(), "nightlane-last-launch-error.txt").delete();
-            startActivity(new Intent(this, activity));
+            if (activity == EngineActivity.class
+                    && settings.optBoolean("nightlane_prelaunch_warmup", true)) {
+                startPrelaunchWarmup(activity);
+            } else {
+                startActivity(new Intent(this, activity));
+            }
         } catch (Throwable t) {
             android.util.Log.e("Nightlane", "Native activity could not launch", t);
             status.setText("Cannot launch native game: " + t);
             error(new IllegalStateException("Cannot launch native game: " + t, t));
         }
+    }
+
+    // Prelaunch preparation happens in the existing launcher worker, not the
+    // game thread. Display percentages correspond to completed shader source
+    // checks and completed local file reads. Skip never modifies installed data.
+    private void startPrelaunchWarmup(Class<?> activity) {
+        if (!warmingNative.compareAndSet(false, true)) return;
+        AtomicBoolean skip = new AtomicBoolean(false);
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        layout.setPadding(dp(22), dp(12), dp(22), dp(16));
+        TextView detail = new TextView(this);
+        detail.setText("Finding shaders and cached assets…");
+        detail.setTextColor(0xffe4ecf5);
+        detail.setTextSize(15);
+        ProgressBar bar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        bar.setMax(100);
+        bar.setIndeterminate(false);
+        bar.setProgress(0);
+        TextView percent = new TextView(this);
+        percent.setText("0%");
+        percent.setTextColor(0xff70d8ff);
+        percent.setTextSize(13);
+        layout.addView(detail);
+        layout.addView(bar);
+        layout.addView(percent);
+        AlertDialog dialog = new AlertDialog.Builder(this)
+            .setTitle("Preparing Nightlane")
+            .setView(layout)
+            .setNegativeButton("Skip", null)
+            .create();
+        dialog.setCancelable(false);
+        dialog.show();
+        dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener(v -> {
+            skip.set(true);
+            detail.setText("Skipping optional preparation…");
+        });
+        String configuredPath = settings.optString("game_folder_path", "").trim();
+        File preferred = configuredPath.isEmpty() ? null : new File(configuredPath);
+        final File root = preferred != null && new File(preferred, "data/manifest.json").isFile()
+            ? preferred : new File(getFilesDir(), "game");
+        worker.execute(() -> {
+            String error = null;
+            try {
+                NightlanePrecache.prepare(this, root, skip,
+                    (done, message) -> runOnUiThread(() -> {
+                        if (isFinishing() || isDestroyed()) return;
+                        bar.setProgress(Math.max(0, Math.min(100, done)));
+                        percent.setText(Math.max(0, Math.min(100, done)) + "%");
+                        detail.setText(message);
+                    }),
+                    source -> {
+                        try { return nativeShaderValidate(source); }
+                        catch (Throwable ignored) { return false; }
+                    });
+            } catch (Exception e) {
+                error = e.toString();
+            }
+            final String failure = error;
+            runOnUiThread(() -> {
+                warmingNative.set(false);
+                if (dialog.isShowing()) dialog.dismiss();
+                if (isFinishing() || isDestroyed()) return;
+                if (failure != null) {
+                    android.util.Log.w("Nightlane", "Optional launch pre-cache was not completed: " + failure);
+                }
+                status.setText(skip.get() ? "Preparation skipped. Launching native ARM64 game…"
+                    : failure == null ? "Shader and file preparation complete. Launching native ARM64 game…"
+                    : "Using original game loading. Launching native ARM64 game…");
+                startActivity(new Intent(this, activity));
+            });
+        });
     }
 
     // Opens a link with whatever browser the phone has. Devices without a
