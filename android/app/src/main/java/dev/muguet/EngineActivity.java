@@ -494,7 +494,6 @@ public final class EngineActivity extends Activity {
             long startedAt = android.os.SystemClock.elapsedRealtime();
             long lastReport = startedAt;
             long lastStartupReport = startedAt;
-            boolean bootstrapReported = false;
             boolean firstPullReported = false;
             boolean firstWriteReported = false;
             long lastProduced = nativeAudioProducedFrames() & 0xffffffffL;
@@ -612,7 +611,6 @@ public final class EngineActivity extends Activity {
                         + " platformBufferFrames=" + track.getBufferCapacityInFrames();
                     Log.i("NightlaneAudio", message);
                     try { nativeAudioReport(message); } catch (Throwable ignored) {}
-                    if (available == 0) bootstrapReported = true;
                 }
                 // Avoid injecting 1024 zero frames whenever the producer only
                 // has a partial block. Consume valid samples, retain remaining
@@ -649,7 +647,16 @@ public final class EngineActivity extends Activity {
                 }
                 while (offset < requestedSamples && audioThreadRunning && !audioPaused) {
                     int requested = requestedSamples - offset;
-                    int wrote = track.write(block, offset, requested, AudioTrack.WRITE_BLOCKING);
+                    int wrote;
+                    try {
+                        wrote = track.write(block, offset, requested, AudioTrack.WRITE_BLOCKING);
+                    } catch (RuntimeException writeError) {
+                        Log.e("NightlaneAudio", "AudioTrack blocking write failed", writeError);
+                        try { nativeAudioReport("AudioTrack.write failed: " + writeError); }
+                        catch (Throwable ignored) {}
+                        audioThreadRunning = false;
+                        return;
+                    }
                     if (wrote > 0) {
                         offset += wrote;
                         if (wrote < requested) shortWrites++;
@@ -659,7 +666,9 @@ public final class EngineActivity extends Activity {
                         shortWrites++;
                         break;
                     } else {
-                        Log.w("NightlaneAudio", "AudioTrack write returned " + wrote);
+                        String message = "AudioTrack.write returned error " + wrote;
+                        Log.w("NightlaneAudio", message);
+                        try { nativeAudioReport(message); } catch (Throwable ignored) {}
                         audioThreadRunning = false;
                         break;
                     }
