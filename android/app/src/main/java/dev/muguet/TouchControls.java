@@ -195,11 +195,13 @@ final class TouchControls extends View {
                 // Free-space swipes rotate the camera. Swiping while holding
                 // AIM or FIRE also steers the aim, so aiming/shooting doesn't
                 // monopolize the right thumb. The left stick stays independent.
-                if (grip.button == -1 || isAimDrag(grip)) {
+                if (grip.button == -1 || isAimDrag(grip)
+                        || (nativeTouchpad && isWheel(grip))) {
                     float dx = x - grip.x, dy = y - grip.y;
                     if (nativeTouchpad) {
-                        // A mobile touchpad follows each gesture increment.
-                        // A held finger does NOT keep turning the camera.
+                        // Mobile touchpad follows incremental motion, including
+                        // a dragged WEAPON button while the wheel is open.
+                        // Holding still NEVER continues rotating the camera.
                         sendLook(TouchLookPolicy.relativePixels(dx, lookSensitivity),
                                  TouchLookPolicy.relativePixels(dy, lookSensitivity));
                     } else if (!nativeRightStick) {
