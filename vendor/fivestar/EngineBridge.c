@@ -455,6 +455,17 @@ static void nativeUpdatePad(JNIEnv *env, jobject thiz, jobjectArray keys,
   PGUpdateVirtualPad(pad);
 }
 
+// True mobile touchpad look: pass a relative cursor movement directly
+// to the wasm guest mouse accumulator. Controller button presses still use
+// nativeUpdatePad(); mouse movement no longer impersonates a held right stick.
+static void nativeTouchLook(JNIEnv *env, jobject thiz, jfloat dx, jfloat dy) {
+  (void)env; (void)thiz;
+  if (!isfinite(dx) || !isfinite(dy)) return;
+  float x = fmaxf(-720.0f, fminf(720.0f, dx));
+  float y = fmaxf(-720.0f, fminf(720.0f, dy));
+  PGInjectTouchMouseDelta((int32_t)lroundf(x), (int32_t)lroundf(y));
+}
+
 // Analog sticks straight from a real gamepad (bypasses key mapping).
 static void nativeUpdatePadAnalog(JNIEnv *env, jobject thiz,
                                   jfloat lx, jfloat ly, jfloat rx, jfloat ry,
@@ -655,6 +666,7 @@ static JNINativeMethod g_methods[] = {
   {"nativeAttachSurface",     "(Landroid/view/Surface;)V",            (void*)nativeAttachSurface},
   {"nativeUpdatePad",         "([Ljava/lang/String;IZFFZ)V",          (void*)nativeUpdatePad},
   {"nativeUpdatePadAnalog",   "(FFFFFFI)V",                            (void*)nativeUpdatePadAnalog},
+  {"nativeTouchLook",         "(FF)V",                                 (void*)nativeTouchLook},
   {"nativeSetTargetingMode", "(I)V",                                 (void*)nativeSetTargetingMode},
   {"nativeAudio",             "([SI)I",                                (void*)nativeAudio},
   {"nativeAudioBufferState", "()J",                                  (void*)nativeAudioBufferState},
