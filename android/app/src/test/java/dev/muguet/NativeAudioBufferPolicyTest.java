@@ -18,6 +18,15 @@ public final class NativeAudioBufferPolicyTest {
         assertEquals(8192, NativeAudioBufferPolicy.boundedAvailable((8192L << 32) | 10000L));
     }
 
+    @Test public void audioTrackStartThresholdIsBelowSoftwareQueue() {
+        assertEquals(2048, NativeAudioBufferPolicy.requestedStartThreshold(8811));
+        assertEquals(2048, NativeAudioBufferPolicy.requestedStartThreshold(8192));
+        assertEquals(512, NativeAudioBufferPolicy.requestedStartThreshold(512));
+        assertEquals(1, NativeAudioBufferPolicy.requestedStartThreshold(0));
+        assertTrue(NativeAudioBufferPolicy.requestedStartThreshold(8811)
+            < NativeAudioBufferPolicy.outputQueueTarget(8811, true));
+    }
+
     @Test public void deviceSizedStartupBufferAvoidsZeroPlaybackHeadDeadlock() {
         assertEquals(8192, NativeAudioBufferPolicy.outputQueueTarget(8811, false));
         assertEquals(4096, NativeAudioBufferPolicy.outputQueueTarget(8811, true));
