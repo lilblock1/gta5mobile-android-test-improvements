@@ -479,6 +479,26 @@ public final class EngineActivity extends Activity {
                 .setTransferMode(AudioTrack.MODE_STREAM).build();
             if (audio.getState() != AudioTrack.STATE_INITIALIZED)
                 throw new IllegalStateException("AudioTrack failed to initialize");
+            // API 31+ initializes the streaming start threshold to the full
+            // device buffer (8811 frames on S25+). The prior 4096/8192-frame
+            // software queue could never reach it: play() said PLAYING but
+            // the hardware playback head remained 0 forever.
+            int capacityFrames = audio.getBufferCapacityInFrames();
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                int before = audio.getStartThresholdInFrames();
+                int desired = NativeAudioBufferPolicy.requestedStartThreshold(capacityFrames);
+                int applied = audio.setStartThresholdInFrames(desired);
+                Log.i("NightlaneAudio", "AudioTrack start threshold " + before
+                    + " -> " + applied + " frames (requested=" + desired
+                    + ", capacity=" + capacityFrames + ")");
+            } else {
+                // API 24–30 does not expose the start threshold. Shrinking
+                // the effective buffer also lowers the implicit threshold.
+                int applied = audio.setBufferSizeInFrames(Math.min(
+                    NativeAudioBufferPolicy.TARGET_QUEUED_FRAMES, capacityFrames));
+                Log.i("NightlaneAudio", "AudioTrack legacy buffer size=" + applied
+                    + " capacity=" + capacityFrames);
+            }
             audioPaused = false;
             audioStarted = false;
             audioOutputSubmittedFrames = 0;
@@ -632,7 +652,10 @@ public final class EngineActivity extends Activity {
                     String message = "AudioTrack.play() before first PCM write at "
                         + (now - startedAt) + "ms, mixerAvailable=" + available
                         + "/" + capacity + " workletCallbacks=" + nativeAudioCallbackCount()
-                        + " platformBufferFrames=" + track.getBufferCapacityInFrames();
+                        + " platformBufferFrames=" + track.getBufferCapacityInFrames()
+                        + " startThresholdFrames=" + (android.os.Build.VERSION.SDK_INT
+                            >= android.os.Build.VERSION_CODES.S
+                            ? track.getStartThresholdInFrames() : -1);
                     Log.i("NightlaneAudio", message);
                     try { nativeAudioReport(message); } catch (Throwable ignored) {}
                 }
@@ -941,6 +964,8 @@ public final class EngineActivity extends Activity {
                 + " submittedFrames=" + audioOutputSubmittedFrames
                 + " queueTarget=" + (track == null ? -1 : NativeAudioBufferPolicy.outputQueueTarget(
                     track.getBufferCapacityInFrames(), played > 0))
+                + " startThreshold=" + (track == null || android.os.Build.VERSION.SDK_INT
+                    < android.os.Build.VERSION_CODES.S ? -1 : track.getStartThresholdInFrames())
                 + " audibleFrames=" + audioOutputAudibleFrames
                 + " peakPcm=" + audioOutputPeakPcm
                 + " underruns=" + (track == null ? -1 : track.getUnderrunCount())
