@@ -359,16 +359,15 @@ public final class LauncherActivity extends Activity {
             } catch (Exception e) { status.setText("Grant 'All files access' to Nightlane Android in Settings > Apps > Special access."); }
         });
         column.addView(grantAccessButton);
-        // The engine writes saves into app-private storage (MUGUET_FSROOT), which
-        // no file browser can open and an uninstall deletes. This lets the player
-        // get them out, and put a friend's back in, without a PC.
+        // Native-only wasm2c writes to game/userdata and game/sandbox, while
+        // the older Wasmtime path used app/files/saves. Back up BOTH.
         TextView savesHeader = new TextView(this);
-        savesHeader.setText("Saves — stored in app storage and removed if you uninstall");
+        savesHeader.setText("Saves — back up before reinstalling or changing game folders");
         column.addView(savesHeader);
         savesStatus = new TextView(this);
         column.addView(savesStatus);
         Button backupButton = new Button(this);
-        backupButton.setText("Back up saves");
+        backupButton.setText("Back up native and legacy saves");
         backupButton.setOnClickListener(v -> {
             Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
             intent.addCategory(Intent.CATEGORY_OPENABLE);
@@ -1239,9 +1238,19 @@ public final class LauncherActivity extends Activity {
             Files.move(temp.toPath(), config().toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
         } catch (Exception e) { error(e); }
     }
-    // The engine's save root. Must match MUGUET_FSROOT in config.rs, or a backup
-    // would silently miss the real save.
+    // Legacy Wasmtime saved in files/saves. The native-only engine passes
+    // its resolved GAME DIRECTORY as pg_files_init(root), so it saves under
+    // <game>/userdata and <game>/sandbox. The old backup ignored those files.
     private File saves() { return new File(getFilesDir(), "saves"); }
+    private File nativeSaveGameRoot() {
+        String picked = "";
+        try {
+            JSONObject cfg = new JSONObject(new String(
+                Files.readAllBytes(config().toPath()), StandardCharsets.UTF_8));
+            picked = cfg.optString("game_folder_path", "").trim();
+        } catch (Exception ignored) {}
+        return NativeSaveStorage.gameRoot(getFilesDir(), picked);
+    }
     private File logFile() { return new File(getFilesDir(), "muguet.log"); }
     private File nativeLogFile() { return new File(getFilesDir(), "nightlane-native.log"); }
     private static void walkFiles(File dir, ArrayList<File> out) {
@@ -1253,14 +1262,21 @@ public final class LauncherActivity extends Activity {
         }
     }
     private void updateSavesStatus() {
-        if (savesStatus == null) return; // built in onCreate, called back from a worker
-        ArrayList<File> files = new ArrayList<>();
-        walkFiles(saves(), files);
+        if (savesStatus == null) return;
+        File game = nativeSaveGameRoot();
+        int nativeCount = 0, legacyCount = 0;
         long bytes = 0;
-        for (File f : files) bytes += f.length();
-        savesStatus.setText(files.isEmpty()
-            ? "No saves yet. Play and save in-game first."
-            : files.size() + " file(s), " + (bytes >> 10) + " KB, in app storage.");
+        for (NativeSaveStorage.Root root : NativeSaveStorage.roots(getFilesDir(), game)) {
+            ArrayList<File> files = new ArrayList<>();
+            walkFiles(root.directory, files);
+            for (File f : files) bytes += f.length();
+            if (root.prefix.startsWith("native/")) nativeCount += files.size();
+            else legacyCount += files.size();
+        }
+        savesStatus.setText(nativeCount + " native file(s), " + legacyCount
+            + " legacy file(s), " + (bytes >> 10) + " KB total."
+            + (nativeCount + legacyCount == 0
+                ? " No save files found yet; play and save in-game first." : ""));
     }
     private void backupSaves(Uri target) {
         status.setText("Packing saves…");
@@ -1270,25 +1286,36 @@ public final class LauncherActivity extends Activity {
             try (OutputStream raw = getContentResolver().openOutputStream(target)) {
                 if (raw == null) throw new IOException("That location refused to be written to");
                 try (ZipOutputStream zip = new ZipOutputStream(raw)) {
-                    ArrayList<File> files = new ArrayList<>();
-                    walkFiles(saves(), files);
                     byte[] buffer = new byte[1 << 20];
-                    for (File file : files) {
-                        String name = saves().toPath().relativize(file.toPath()).toString().replace(File.separatorChar, '/');
-                        zip.putNextEntry(new ZipEntry(name));
-                        try (InputStream in = new FileInputStream(file)) {
-                            int n;
-                            while ((n = in.read(buffer)) != -1) zip.write(buffer, 0, n);
+                    File nativeGame = nativeSaveGameRoot();
+                    for (NativeSaveStorage.Root root :
+                            NativeSaveStorage.roots(getFilesDir(), nativeGame)) {
+                        ArrayList<File> files = new ArrayList<>();
+                        walkFiles(root.directory, files);
+                        for (File file : files) {
+                            // Never back up arbitrary paths through symlinks.
+                            if (!file.getCanonicalPath().startsWith(
+                                    root.directory.getCanonicalPath() + File.separator)) continue;
+                            String relative = root.directory.toPath().relativize(file.toPath())
+                                .toString().replace(File.separatorChar, '/');
+                            String name = root.prefix + relative;
+                            zip.putNextEntry(new ZipEntry(name));
+                            try (InputStream in = new FileInputStream(file)) {
+                                int n;
+                                while ((n = in.read(buffer)) != -1) zip.write(buffer, 0, n);
+                            }
+                            zip.closeEntry();
+                            written++;
                         }
-                        zip.closeEntry();
-                        written++;
                     }
                 }
             } catch (Exception e) { failure = e; }
             final Exception problem = failure;
             final int count = written;
             runOnUiThread(() -> {
-                if (problem == null) status.setText("Backed up " + count + " save file(s) to " + lastName(target) + ".");
+                if (problem == null) status.setText(count == 0
+                    ? "No save files found. The ZIP is empty; check the selected game folder."
+                    : "Backed up " + count + " native/legacy save file(s) to " + lastName(target) + ".");
                 else status.setText("Save backup failed: " + problem.getMessage());
                 updateSavesStatus();
             });
@@ -1389,7 +1416,8 @@ public final class LauncherActivity extends Activity {
                 try (ZipInputStream zip = new ZipInputStream(raw)) {
                     ZipEntry entry;
                     while ((entry = zip.getNextEntry()) != null) {
-                        File out = inside(saves(), entry.getName());
+                        File out = NativeSaveStorage.restoreTarget(
+                            getFilesDir(), nativeSaveGameRoot(), entry.getName());
                         if (entry.isDirectory()) { out.mkdirs(); continue; }
                         File parent = out.getParentFile();
                         if (parent != null) parent.mkdirs();
