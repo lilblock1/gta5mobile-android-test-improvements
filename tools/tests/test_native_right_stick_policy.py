@@ -40,7 +40,8 @@ class NativeRightStickPolicyTest(unittest.TestCase):
     def test_old_game_activity_retains_relative_touch_look(self):
         touch = source("android/app/src/main/java/dev/muguet/TouchControls.java")
         self.assertIn("GameActivity::nativeLook", touch)
-        self.assertIn("if (grip.button == -1 || isAimDrag(grip))", touch)
+        self.assertIn("if (grip.button == -1 || isAimDrag(grip)", touch)
+        self.assertIn("nativeTouchpad && isWheel(grip)", touch)
         self.assertIn("} else if (!nativeRightStick) {", touch)
         self.assertIn("sendLook(dx * 3 * lookSensitivity, dy * 3 * lookSensitivity);", touch)
 
