@@ -11,6 +11,25 @@
 #include <string.h>
 #include <limits.h>
 #include <pthread.h>
+#include <stdatomic.h>
+
+static _Atomic uint32_t saveTraceCount;
+static bool savePath(const char *path) {
+  return path && (!strncmp(path, "/userdata/", 10)
+      || !strcmp(path, "/userdata")
+      || !strncmp(path, "/sandbox/", 9)
+      || !strcmp(path, "/sandbox"));
+}
+// Only capture the initial save I/O events, so normal gameplay frame pacing
+// and the bounded native log are not impacted by repeated directory scans.
+static void traceSave(const char *operation, const char *path, int64_t value, int resultErrno) {
+  if (!savePath(path)) return;
+  if (atomic_fetch_add_explicit(&saveTraceCount, 1, memory_order_relaxed) >= 96) return;
+  char line[320];
+  snprintf(line, sizeof line, "Save filesystem: %s %s value=%lld errno=%d",
+      operation, path, (long long)value, resultErrno);
+  pg_log(line);
+}
 
 #define PG_FDS 512
 static struct { int native; DIR *dir; uint64_t position; char path[PATH_MAX]; } descriptors[PG_FDS];
@@ -34,7 +53,10 @@ void pg_files_init(const char *root) {
   snprintf(filesRoot,sizeof filesRoot,"%s",root);
   mkdir(root,0700);
   for(int i=0;i<PG_FDS;i++) descriptors[i].native=-1;
-  const char *paths[]={"/tmp","/home","/home/web_user","/dev","/proc","/proc/self","/proc/self/fd"};
+  // Pre-create native save enumeration roots. Manual saves may enumerate
+  // them before any autosave has made the directories.
+  const char *paths[]={"/tmp","/home","/home/web_user","/dev","/proc","/proc/self","/proc/self/fd",
+      "/userdata","/userdata/Documents","/sandbox","/sandbox/Documents"};
   for(size_t i=0;i<sizeof paths/sizeof *paths;i++) {
     char path[PATH_MAX]; snprintf(path,sizeof path,"%s%s",root,paths[i]); mkdir(path,0700);
   }
@@ -80,9 +102,22 @@ u32 w2c_env_0x5F_syscall_openat(struct w2c_env *host,u32 fd,u64 name,u32 flags,u
   if(pathAt(host,fd,name,path,virtualPath)<0){u32 e=failure();pthread_mutex_unlock(&filesLock);return e;}
   int mode=args?*(u32 *)pg_pointer(host,args,4):0666;
   int n=!strcmp(virtualPath,"/dev/null")?open("/dev/null",openFlags(flags),mode):open(path,openFlags(flags),mode);
-  if(n<0){u32 e=failure();pthread_mutex_unlock(&filesLock);return e;}
-  for(int i=3;i<PG_FDS;i++)if(descriptors[i].native<0){descriptors[i].native=n;strcpy(descriptors[i].path,virtualPath);pthread_mutex_unlock(&filesLock);return i;}
-  close(n);pthread_mutex_unlock(&filesLock);return (u32)-33;
+  if(n<0){
+    int savedErrno = errno;
+    u32 e=failure();
+    pthread_mutex_unlock(&filesLock);
+    traceSave("open-failed", virtualPath, flags, savedErrno);
+    return e;
+  }
+  for(int i=3;i<PG_FDS;i++)if(descriptors[i].native<0){
+    descriptors[i].native=n;strcpy(descriptors[i].path,virtualPath);
+    pthread_mutex_unlock(&filesLock);
+    traceSave("opened", virtualPath, i, 0);
+    return i;
+  }
+  close(n);pthread_mutex_unlock(&filesLock);
+  traceSave("fd-limit", virtualPath, PG_FDS, EMFILE);
+  return (u32)-33;
 }
 static void writeStat(struct w2c_env *host,u64 at,const struct stat *s) {
   uint8_t *p=pg_pointer(host,at,104);memset(p,0,104);
@@ -107,8 +142,15 @@ u32 w2c_env_0x5F_syscall_renameat(struct w2c_env *h,u32 a,u64 old,u32 b,u64 new)
 u32 w2c_env_0x5F_syscall_ftruncate64(struct w2c_env *h,u32 fd,u64 length){int n=nativeFD(fd);if(n<0||ftruncate(n,(int64_t)length)<0)return failure();return 0;}
 u32 w2c_wasi__snapshot__preview1_fd_close(struct w2c_wasi__snapshot__preview1 *h,u32 fd){
   if(fd<3)return 0;pthread_mutex_lock(&filesLock);int n=nativeFD(fd);if(n<0){pthread_mutex_unlock(&filesLock);return 8;}
-  if(descriptors[fd].dir)closedir(descriptors[fd].dir);else close(n);
-  memset(&descriptors[fd],0,sizeof descriptors[fd]);descriptors[fd].native=-1;pthread_mutex_unlock(&filesLock);return 0;
+  // fdopendir() owns a dup(n), not n itself. Closing only the DIR leaks
+  // the original descriptor on every manual save-slot enumeration.
+  char closedPath[PATH_MAX];snprintf(closedPath,sizeof closedPath,"%s",descriptors[fd].path);
+  if(descriptors[fd].dir)closedir(descriptors[fd].dir);
+  close(n);
+  memset(&descriptors[fd],0,sizeof descriptors[fd]);descriptors[fd].native=-1;
+  pthread_mutex_unlock(&filesLock);
+  traceSave("closed", closedPath, fd, 0);
+  return 0;
 }
 u32 pg_file_io(struct w2c_env *h,u32 fd,u64 vectors,u64 count,u64 offset,u64 out,bool writing,bool positioned){
   if(count>SIZE_MAX/16)return 28;
@@ -122,18 +164,26 @@ u32 pg_file_io(struct w2c_env *h,u32 fd,u64 vectors,u64 count,u64 offset,u64 out
     else actual=positioned?pread(n,p,size,(int64_t)(offset+total)):read(n,p,size);
     if(actual<0){if(!total)return guestError(errno);break;}total+=actual;if((u64)actual<size)break;
   }
-  *(u64 *)pg_pointer(h,out,8)=total;return 0;
+  *(u64 *)pg_pointer(h,out,8)=total;
+  if (writing && fd >= 3 && fd < PG_FDS) traceSave("write", descriptors[fd].path, (int64_t)total, 0);
+  return 0;
 }
 u32 w2c_wasi__snapshot__preview1_fd_read(struct w2c_wasi__snapshot__preview1 *h,u32 fd,u64 v,u64 c,u64 o){return pg_file_io(h->env,fd,v,c,0,o,false,false);}
 u32 w2c_wasi__snapshot__preview1_fd_pread(struct w2c_wasi__snapshot__preview1 *h,u32 fd,u64 v,u64 c,u64 at,u64 o){return pg_file_io(h->env,fd,v,c,at,o,false,true);}
 u32 w2c_wasi__snapshot__preview1_fd_pwrite(struct w2c_wasi__snapshot__preview1 *h,u32 fd,u64 v,u64 c,u64 at,u64 o){return pg_file_io(h->env,fd,v,c,at,o,true,true);}
 u32 w2c_wasi__snapshot__preview1_fd_seek(struct w2c_wasi__snapshot__preview1 *h,u32 fd,u64 offset,u32 whence,u64 out){if(whence>2)return 28;int n=nativeFD(fd);if(n<0)return 8;off_t pos=lseek(n,(int64_t)offset,whence);if(pos<0)return guestError(errno);*(u64 *)pg_pointer(h->env,out,8)=pos;return 0;}
 u32 w2c_env_0x5F_syscall_getdents64(struct w2c_env *h,u32 fd,u64 at,u64 capacity){
+  // Capture an entry event before the shared descriptor lock/readdir call,
+  // to identify a save-slot enumeration hang if no completion is logged.
+  if (fd >= 3 && fd < PG_FDS) traceSave("enumerate-begin", descriptors[fd].path, fd, 0);
   pthread_mutex_lock(&filesLock);int n=nativeFD(fd);if(n<0){pthread_mutex_unlock(&filesLock);return (u32)-8;}
   if(!descriptors[fd].dir){int copy=dup(n);descriptors[fd].dir=fdopendir(copy);if(!descriptors[fd].dir){if(copy>=0)close(copy);u32 e=failure();pthread_mutex_unlock(&filesLock);return e;}}
   uint8_t *output=pg_pointer(h,at,capacity);u64 size=0;struct dirent *entry;
   while(capacity-size>=280&&(entry=readdir(descriptors[fd].dir))){uint8_t *p=output+size;memset(p,0,280);*(u64 *)p=entry->d_ino;*(u64 *)(p+8)=++descriptors[fd].position*280;*(uint16_t *)(p+16)=280;p[18]=entry->d_type;snprintf((char *)p+19,256,"%s",entry->d_name);size+=280;}
-  pthread_mutex_unlock(&filesLock);return size;
+  char enumeratedPath[PATH_MAX];snprintf(enumeratedPath,sizeof enumeratedPath,"%s",descriptors[fd].path);
+  pthread_mutex_unlock(&filesLock);
+  traceSave("enumerate-end", enumeratedPath, (int64_t)size, 0);
+  return size;
 }
 u32 w2c_env_0x5F_syscall_fcntl64(struct w2c_env *h,u32 fd,u32 command,u64 args){
   int n=nativeFD(fd);if(n<0)return failure();
