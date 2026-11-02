@@ -296,6 +296,34 @@ uint32_t PGCurrentTouchContext(void){
  if(!atomic_load(&inputBlock))return 0;
  return pg_touch_context((const uint8_t *)(void *)env.memory.data,env.memory.size);
 }
+// Android touchpad gestures arrive independently of the engine render/pad
+// poll rate. Publish relative mouse movement directly to the pinned wasm
+// input block so brief fast swipes are not lost between 30-fps game updates.
+// A stationary finger never injects new deltas; the game consumes them once.
+void PGInjectTouchMouseDelta(int32_t dx, int32_t dy) {
+  uint64_t block = atomic_load_explicit(&inputBlock, memory_order_acquire);
+  if (!block || (!dx && !dy)) return;
+  if (dx > 720) dx = 720; else if (dx < -720) dx = -720;
+  if (dy > 720) dy = 720; else if (dy < -720) dy = -720;
+  uint8_t *base = pg_pointer(&env, block, 444);
+  _Atomic int32_t *words = (_Atomic int32_t *)(void *)(base + 256);
+  // Offsets 264/268 are guest mouse movement accumulators. The guest resets
+  // these after polling, which gives us native mouse/touchpad semantics.
+  atomic_fetch_add_explicit(words + 2, dx, memory_order_relaxed);
+  atomic_fetch_add_explicit(words + 3, dy, memory_order_relaxed);
+  // Update absolute cursor as well for GTA's front-end/weapon-wheel UI.
+  int32_t width = atomic_load_explicit(words + 44, memory_order_relaxed);
+  int32_t height = atomic_load_explicit(words + 45, memory_order_relaxed);
+  if (width < 320 || height < 180) { width = 960; height = 540; }
+  int32_t x = atomic_load_explicit(words, memory_order_relaxed);
+  int32_t y = atomic_load_explicit(words + 1, memory_order_relaxed);
+  int64_t nextX = (int64_t)x + dx, nextY = (int64_t)y + dy;
+  int32_t targetX = (int32_t)(nextX < 0 ? 0 : nextX >= width ? width - 1 : nextX);
+  int32_t targetY = (int32_t)(nextY < 0 ? 0 : nextY >= height ? height - 1 : nextY);
+  atomic_store_explicit(words, targetX, memory_order_relaxed);
+  atomic_store_explicit(words + 1, targetY, memory_order_relaxed);
+}
+
 void PGUpdateController(PGControllerState state, double elapsedSeconds) {
   uint64_t block = atomic_load(&inputBlock);
   if (!block) return;
