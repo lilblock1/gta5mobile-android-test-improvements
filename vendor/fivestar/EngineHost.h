@@ -34,6 +34,9 @@ void PGSetLocalGameFolder(const char *dataPath);
 bool PGUsingLocalGameFolder(void);
 void PGStartEngine(const char *manifestPath, const char *filesRoot, PGLogCallback, void *context);
 void PGUpdateController(PGControllerState state, double elapsedSeconds);
+// Inject native touchpad gestures into the WASM host's real mouse movement
+// accumulator without overwriting virtual-pad buttons or physical sticks.
+void PGInjectTouchMouseDelta(int32_t dx, int32_t dy);
 // Player context: 0 on foot, otherwise the vehicle type + 1 (see NativeTouchContext.h).
 uint32_t PGCurrentTouchContext(void);
 // Virtual controller fed into the engine's own pad 0 (see

@@ -22,6 +22,10 @@ final class TouchControls extends View {
     interface LookSink { void onLook(float dx, float dy); }
     private final LookSink lookSink;
     private final boolean nativeRightStick;
+    private final boolean nativeTouchpad;
+    // Subpixel fractions survive small movements and low sensitivity. They
+    // are discarded on finger-up rather than causing delayed camera drift.
+    private float pendingTouchpadX, pendingTouchpadY;
     static final class Input {
         final HashSet<String> keys = new HashSet<>();
         int buttons;
@@ -59,19 +63,23 @@ final class TouchControls extends View {
         this(context, lookSensitivity, GameActivity::nativeLook);
     }
     TouchControls(Context context, float lookSensitivity, LookSink lookSink) {
-        this(context, lookSensitivity, lookSink, false);
+        this(context, lookSensitivity, lookSink, false, false);
     }
-    // Native ARM64 translates a held camera finger to a controller stick;
-    // legacy GameActivity continues receiving relative-look swipe events.
+    // Legacy optional stick mode is retained as a rollback for the new
+    // touchpad path; it also remains the distinct path for real controllers.
     TouchControls(Context context, float lookSensitivity, boolean nativeRightStick) {
-        this(context, lookSensitivity, (dx, dy) -> {}, nativeRightStick);
+        this(context, lookSensitivity, (dx, dy) -> {}, nativeRightStick, false);
+    }
+    static TouchControls nativeTouchpad(Context context, float lookSensitivity, LookSink lookSink) {
+        return new TouchControls(context, lookSensitivity, lookSink, false, true);
     }
     private TouchControls(Context context, float lookSensitivity, LookSink lookSink,
-                          boolean nativeRightStick) {
+                          boolean nativeRightStick, boolean nativeTouchpad) {
         super(context);
         if (lookSink == null) throw new IllegalArgumentException("Touch look sink is required");
         this.lookSink = lookSink;
         this.nativeRightStick = nativeRightStick;
+        this.nativeTouchpad = nativeTouchpad;
         this.lookSensitivity = lookSensitivity;
         density = getResources().getDisplayMetrics().density;
         JSONObject config;
@@ -90,7 +98,11 @@ final class TouchControls extends View {
         return Float.isFinite(value) ? Math.max(low, Math.min(high, value)) : low;
     }
     void setInCar(boolean value) { release(); inCar = value; layoutButtons(); invalidate(); }
-    void release() { grips.clear(); keyUntil.clear(); fireUntil = 0; aim = false; invalidate(); }
+    void release() {
+        grips.clear(); keyUntil.clear(); fireUntil = 0; aim = false;
+        pendingTouchpadX = pendingTouchpadY = 0f;
+        invalidate();
+    }
     @Override protected void onSizeChanged(int w, int h, int oldW, int oldH) { release(); layoutButtons(); }
     @Override public WindowInsets onApplyWindowInsets(WindowInsets insets) { release(); layoutButtons(); return super.onApplyWindowInsets(insets); }
     private void layoutButtons() {
@@ -183,12 +195,26 @@ final class TouchControls extends View {
                 // Free-space swipes rotate the camera. Swiping while holding
                 // AIM or FIRE also steers the aim, so aiming/shooting doesn't
                 // monopolize the right thumb. The left stick stays independent.
-                if (!nativeRightStick && (grip.button == -1 || isAimDrag(grip)))
-                    sendLook((x - grip.x) * 3 * lookSensitivity, (y - grip.y) * 3 * lookSensitivity);
+                if (grip.button == -1 || isAimDrag(grip)
+                        || (nativeTouchpad && isWheel(grip))) {
+                    float dx = x - grip.x, dy = y - grip.y;
+                    if (nativeTouchpad) {
+                        // Mobile touchpad follows incremental motion, including
+                        // a dragged WEAPON button while the wheel is open.
+                        // Holding still NEVER continues rotating the camera.
+                        sendLook(TouchLookPolicy.relativePixels(dx, lookSensitivity),
+                                 TouchLookPolicy.relativePixels(dy, lookSensitivity));
+                    } else if (!nativeRightStick) {
+                        // Preserve the existing older GameActivity mouse path.
+                        sendLook(dx * 3 * lookSensitivity, dy * 3 * lookSensitivity);
+                    }
+                }
                 grip.x = x; grip.y = y;
             }
-        } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP) grips.remove(event.getPointerId(index));
-        else if (action == MotionEvent.ACTION_CANCEL) release();
+        } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP) {
+            grips.remove(event.getPointerId(index));
+            if (!hasCameraFinger()) pendingTouchpadX = pendingTouchpadY = 0f;
+        } else if (action == MotionEvent.ACTION_CANCEL) release();
         invalidate(); return true;
     }
     private boolean isAimDrag(Grip grip) {
@@ -203,11 +229,23 @@ final class TouchControls extends View {
         return false;
     }
     private void sendLook(float dx, float dy) {
-        // Reject impossible deltas generated by bad touch data or resumed
-        // surfaces. The engine consumes these on the next 60 Hz input update.
-        if (Float.isFinite(dx) && Float.isFinite(dy))
+        if (!Float.isFinite(dx) || !Float.isFinite(dy)) return;
+        if (nativeTouchpad) {
+            // Native mouse input is integer guest pixels; preserve fractional
+            // swipes instead of discarding each subpixel MotionEvent.
+            pendingTouchpadX += dx;
+            pendingTouchpadY += dy;
+            int wholeX = (int) pendingTouchpadX, wholeY = (int) pendingTouchpadY;
+            pendingTouchpadX -= wholeX;
+            pendingTouchpadY -= wholeY;
+            if (wholeX != 0 || wholeY != 0)
+                lookSink.onLook(Math.max(-720, Math.min(720, wholeX)),
+                                Math.max(-720, Math.min(720, wholeY)));
+        } else {
+            // Legacy GameActivity's look code continues using relative swipes.
             lookSink.onLook(Math.max(-720f, Math.min(720f, dx)),
                             Math.max(-720f, Math.min(720f, dy)));
+        }
     }
     private boolean isWheel(Grip grip) {
         if (grip.button < 0 || grip.button >= buttons.size()) return false;
@@ -238,7 +276,11 @@ final class TouchControls extends View {
                     double length = Math.hypot(dx, dy);
                     if (length > 10) {
                         float push = (float) (40 * lookSensitivity * Math.min((length - 10) / 45, 1) / length);
-                        if (!nativeRightStick) sendLook(dx * push, dy * push);
+                        // Legacy wheel steering is frame-based; don't replay a
+                        // stationary weapon-wheel displacement as camera look
+                        // in native touchpad mode.
+                        if (!nativeRightStick && !nativeTouchpad)
+                            sendLook(dx * push, dy * push);
                     }
                 }
             }

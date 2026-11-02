@@ -192,7 +192,7 @@ public final class LauncherActivity extends Activity {
     private ProgressBar progress;
     private Spinner mode, heap, streamingBudget, worldstreamMode, msaaMode, frameQueue, nativeCpuWorkers, pipelineWorkers;
     private Spinner nightlanePresent, nightlaneSharpness, nightlaneLod, nightlaneHudSize, nightlaneHudOpacity;
-    private CheckBox nightlaneThermal, nightlaneCompactHud, touchFreeAim, automaticHeap, readAhead, readbackReuse, prelaunchWarmup, shadowFix;
+    private CheckBox nightlaneThermal, nightlaneCompactHud, touchFreeAim, touchpadCamera, automaticHeap, readAhead, readbackReuse, prelaunchWarmup, shadowFix;
     private static final double[] STREAMING_BUDGETS = {0.35, 0.25, 0.15};
     private EditText scale, name, magnetField, relayUrl, relayRoom, relayKey;
     private CheckBox mute, multiplayer, cpuBc, softwareClip;
@@ -534,6 +534,8 @@ public final class LauncherActivity extends Activity {
             settings.optBoolean("nightlane_thermal_adaptive", true));
         touchFreeAim = check(column, "Free aiming for touch controls (lets right-thumb swipe steer your aim while holding AIM)",
             settings.optBoolean("nightlane_touch_free_aim", true));
+        touchpadCamera = check(column, "Camera: touchpad swipe (mobile style). Uncheck for the old virtual right stick",
+            settings.optBoolean("nightlane_touchpad_camera", true));
         nightlaneCompactHud = check(column, "Compact touch HUD — group secondary buttons under MORE",
             settings.optBoolean("nightlane_compact_hud", true));
         double savedHudScale = settings.optDouble("nightlane_hud_scale", 0.85);
@@ -568,7 +570,7 @@ public final class LauncherActivity extends Activity {
         relayKey = field(column, "Access code (from the host)", settings.optString("relay_key", ""));
         name = field(column, "Player name", settings.optString("player_name", ""));
         sensitivityLabel = new TextView(this);
-        sensitivityLabel.setText("Look sensitivity (touch drag, up to 12x)");
+        sensitivityLabel.setText("Camera swipe sensitivity (up to 12x)");
         column.addView(sensitivityLabel);
         sensitivity = new SeekBar(this);
         sensitivity.setMax(LookSensitivity.MAX_PROGRESS);
@@ -578,7 +580,7 @@ public final class LauncherActivity extends Activity {
             @Override public void onProgressChanged(SeekBar bar, int value, boolean fromUser) {
                 int level = Math.max(1, value);
                 if (level != value) bar.setProgress(level); // 0 leaves touch look unusable.
-                sensitivityLabel.setText("Look sensitivity (touch drag): " + String.format(java.util.Locale.ROOT, "%.2fx", LookSensitivity.fromSlider(level)));
+                sensitivityLabel.setText("Camera sensitivity: " + String.format(java.util.Locale.ROOT, "%.2fx", LookSensitivity.fromSlider(level)));
             }
             @Override public void onStartTrackingTouch(SeekBar bar) {}
             @Override public void onStopTrackingTouch(SeekBar bar) {}
@@ -851,6 +853,7 @@ public final class LauncherActivity extends Activity {
             settings.put("nightlane_thermal_adaptive", nightlaneThermal.isChecked());
             settings.put("nightlane_compact_hud", nightlaneCompactHud.isChecked());
             settings.put("nightlane_touch_free_aim", touchFreeAim.isChecked());
+            settings.put("nightlane_touchpad_camera", touchpadCamera.isChecked());
             settings.put("nightlane_hud_scale",
                 new double[]{0.85, 1.0, 1.15}[nightlaneHudSize.getSelectedItemPosition()]);
             settings.put("nightlane_hud_opacity",
