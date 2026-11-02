@@ -18,6 +18,27 @@ public final class NativeAudioBufferPolicyTest {
         assertEquals(8192, NativeAudioBufferPolicy.boundedAvailable((8192L << 32) | 10000L));
     }
 
+    @Test public void deviceSizedStartupBufferAvoidsZeroPlaybackHeadDeadlock() {
+        assertEquals(8192, NativeAudioBufferPolicy.outputQueueTarget(8811, false));
+        assertEquals(4096, NativeAudioBufferPolicy.outputQueueTarget(8811, true));
+        assertEquals(4096, NativeAudioBufferPolicy.outputQueueTarget(4096, false));
+        assertEquals(2048, NativeAudioBufferPolicy.outputQueueTarget(2048, false));
+        assertEquals(2048, NativeAudioBufferPolicy.outputQueueTarget(2048, true));
+        assertEquals(4096, NativeAudioBufferPolicy.outputQueueTarget(0, false));
+    }
+
+    @Test public void outputMeterCountsOnlyAudibleWrittenStereoFrames() {
+        short[] pcm = new short[] {0, 0, 9, -16, 17, 0, 0, -18, 0, 0};
+        assertEquals(2, NativeAudioBufferPolicy.countAudibleFrames(pcm, 0, pcm.length));
+        assertEquals(1, NativeAudioBufferPolicy.countAudibleFrames(pcm, 4, 2));
+        assertEquals(0, NativeAudioBufferPolicy.countAudibleFrames(pcm, 0, 4));
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void invalidPcmRangesFailFast() {
+        NativeAudioBufferPolicy.countAudibleFrames(new short[2], 2, 4);
+    }
+
     @Test public void onlyWaitWhenOutputHasRoomToAbsorbStall() {
         assertTrue(NativeAudioBufferPolicy.waitForProducer(0, 2000, false));
         assertFalse(NativeAudioBufferPolicy.waitForProducer(0, 256, false));

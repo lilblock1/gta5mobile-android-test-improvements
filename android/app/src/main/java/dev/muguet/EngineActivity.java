@@ -78,6 +78,8 @@ public final class EngineActivity extends Activity {
     // Audio playback continues independently of the 60 Hz UI/input pump;
     // game process startup may run well before the first onResume tick.
     private volatile boolean audioThreadRunning, audioPaused, audioStarted;
+    private volatile long audioOutputSubmittedFrames, audioOutputAudibleFrames;
+    private volatile int audioOutputPeakPcm;
     private long lastAudioWatchdogAtMs, lastAudioWatchdogProduced, lastAudioWatchdogCallbacks;
     private long lastAudioWatchdogPlayback;
     private volatile boolean running, muted, surfaceReady, engineCoreLoaded;
@@ -479,6 +481,9 @@ public final class EngineActivity extends Activity {
                 throw new IllegalStateException("AudioTrack failed to initialize");
             audioPaused = false;
             audioStarted = false;
+            audioOutputSubmittedFrames = 0;
+            audioOutputAudibleFrames = 0;
+            audioOutputPeakPcm = 0;
             audioThreadRunning = true;
         } catch (Throwable error) {
             Log.e("NightlaneAudio", "Audio output initialization failed", error);
@@ -508,6 +513,8 @@ public final class EngineActivity extends Activity {
             int sourceSlowSeconds = 0;
             int sourceSampleSeconds = 0;
             long peakQueue = 0;
+            boolean zeroHeadWarningReported = false;
+            long playbackBeganAt = 0;
             while (audioThreadRunning && !Thread.currentThread().isInterrupted()) {
                 if (audioPaused) {
                     try { Thread.sleep(8); }
@@ -562,6 +569,8 @@ public final class EngineActivity extends Activity {
                 }
                 long queued = NativeAudioBufferPolicy.queueDepth(writtenFrames, played);
                 peakQueue = Math.max(peakQueue, queued);
+                int queueTarget = NativeAudioBufferPolicy.outputQueueTarget(
+                    track.getBufferCapacityInFrames(), played > 0);
                 if (priming && now - startedAt < NativeAudioBufferPolicy.MAX_STARTUP_WAIT_MS
                         && available < NativeAudioBufferPolicy.startupWatermark(capacity)) {
                     waitingCycles++;
@@ -569,14 +578,26 @@ public final class EngineActivity extends Activity {
                     catch (InterruptedException stop) { return; }
                     continue;
                 }
-                if (!priming && queued >= NativeAudioBufferPolicy.TARGET_QUEUED_FRAMES) {
+                // Before the playback head first advances, prime as much as
+                // the hardware buffer allows (bounded to 8192 frames). The
+                // previous 4096-frame ceiling could deadlock on larger devices.
+                if (!priming && queued >= queueTarget) {
+                    if (!zeroHeadWarningReported && played == 0 && playbackBeganAt > 0
+                            && now - playbackBeganAt >= 2500) {
+                        zeroHeadWarningReported = true;
+                        String message = "AudioTrack zero-head stall: submitted=" + writtenFrames
+                            + " target=" + queueTarget + " capacity="
+                            + track.getBufferCapacityInFrames() + " mixerAvailable=" + available;
+                        Log.w("NightlaneAudio", message);
+                        try { nativeAudioReport(message); } catch (Throwable ignored) {}
+                    }
                     try { Thread.sleep(4); }
                     catch (InterruptedException stop) { return; }
                     continue;
                 }
                 if (NativeAudioBufferPolicy.waitForProducer(available, queued, priming)
                         && (priming ? now - startedAt < NativeAudioBufferPolicy.MAX_STARTUP_WAIT_MS
-                                   : queued >= NativeAudioBufferPolicy.MIN_QUEUED_FRAMES)) {
+                                   : played > 0 && queued >= NativeAudioBufferPolicy.MIN_QUEUED_FRAMES)) {
                     waitingCycles++;
                     try { Thread.sleep(4); }
                     catch (InterruptedException stop) { return; }
@@ -600,6 +621,7 @@ public final class EngineActivity extends Activity {
                     try {
                         track.play();
                         audioStarted = true;
+                        playbackBeganAt = now;
                     } catch (IllegalStateException failure) {
                         Log.e("NightlaneAudio", "Unable to start AudioTrack before PCM writes", failure);
                         String message = "AudioTrack.play() failed: " + failure;
@@ -651,7 +673,12 @@ public final class EngineActivity extends Activity {
                     int requested = requestedSamples - offset;
                     int wrote;
                     try {
-                        wrote = track.write(block, offset, requested, AudioTrack.WRITE_BLOCKING);
+                        // Never block forever while the playback head remains
+                        // at zero. Once the device actually begins draining,
+                        // switch back to the normal blocking writes.
+                        int mode = played == 0 ? AudioTrack.WRITE_NON_BLOCKING
+                                               : AudioTrack.WRITE_BLOCKING;
+                        wrote = track.write(block, offset, requested, mode);
                     } catch (RuntimeException writeError) {
                         Log.e("NightlaneAudio", "AudioTrack blocking write failed", writeError);
                         try { nativeAudioReport("AudioTrack.write failed: " + writeError); }
@@ -662,10 +689,21 @@ public final class EngineActivity extends Activity {
                     if (wrote > 0) {
                         offset += wrote;
                         if (wrote < requested) shortWrites++;
-                        // WRITE_BLOCKING counts samples, not frames.
+                        // AudioTrack.write(short[]) returns samples, not stereo frames.
                         writtenFrames += wrote / 2;
+                        audioOutputSubmittedFrames = writtenFrames;
+                        audioOutputAudibleFrames +=
+                            NativeAudioBufferPolicy.countAudibleFrames(block, offset - wrote, wrote);
+                        for (int i = offset - wrote; i < offset; i++) {
+                            int amplitude = Math.abs((int)block[i]);
+                            if (amplitude > audioOutputPeakPcm) audioOutputPeakPcm = amplitude;
+                        }
                     } else if (wrote == 0) {
                         shortWrites++;
+                        // Non-blocking prefill has reached device capacity.
+                        // Do not busy-spin; the watchdog tracks head movement.
+                        try { Thread.sleep(4); }
+                        catch (InterruptedException stop) { return; }
                         break;
                     } else {
                         String message = "AudioTrack.write returned error " + wrote;
@@ -691,6 +729,9 @@ public final class EngineActivity extends Activity {
                         + " ringAvailable=" + available + "/" + capacity
                         + " workletCallbacks=" + nativeAudioCallbackCount()
                         + " outputQueued=" + queued + " peakQueue=" + peakQueue
+                        + " queueTarget=" + queueTarget
+                        + " audibleFrames=" + audioOutputAudibleFrames
+                        + " peakPcm=" + audioOutputPeakPcm
                         + " audioState=" + track.getPlayState()
                         + " AndroidUnderruns=" + track.getUnderrunCount()
                         + " shortWrites=" + shortWrites + " emptyReads=" + emptyReads
@@ -897,6 +938,11 @@ public final class EngineActivity extends Activity {
                 + " audioStarted=" + audioStarted + " paused=" + audioPaused
                 + " trackState=" + (track == null ? -1 : track.getPlayState())
                 + " headFrames=" + played + " headDelta=" + playedDelta
+                + " submittedFrames=" + audioOutputSubmittedFrames
+                + " queueTarget=" + (track == null ? -1 : NativeAudioBufferPolicy.outputQueueTarget(
+                    track.getBufferCapacityInFrames(), played > 0))
+                + " audibleFrames=" + audioOutputAudibleFrames
+                + " peakPcm=" + audioOutputPeakPcm
                 + " underruns=" + (track == null ? -1 : track.getUnderrunCount())
                 + " worker=" + workerState + stackTop;
             Log.i("NightlaneAudio", message);

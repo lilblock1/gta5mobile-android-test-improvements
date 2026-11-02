@@ -54,6 +54,30 @@ final class NativeAudioBufferPolicy {
             elapsedMs >= MAX_STARTUP_WAIT_MS;
     }
 
+    // Some Android routes do not advance the playback head until enough PCM
+    // has been written to start the hardware stream. Limiting initial writes
+    // to 4096 frames on an 8811-frame device can leave the playback head at 0
+    // forever. Until we see real head movement, allow one bounded device-sized
+    // prefill; after that, return to the low-latency 4096-frame target.
+    static int outputQueueTarget(int deviceCapacityFrames, boolean playbackAdvanced) {
+        if (deviceCapacityFrames <= 0) return TARGET_QUEUED_FRAMES;
+        int wanted = playbackAdvanced ? TARGET_QUEUED_FRAMES : 8192;
+        return Math.max(1, Math.min(wanted, deviceCapacityFrames));
+    }
+
+    // How many frames in an interleaved stereo PCM16 range have a meaningful
+    // signal? Only counts actual output writes, not a ring producer index.
+    static int countAudibleFrames(short[] pcm, int offsetSamples, int countSamples) {
+        if (pcm == null || offsetSamples < 0 || countSamples < 0
+                || offsetSamples > pcm.length || countSamples > pcm.length - offsetSamples)
+            throw new IllegalArgumentException("Invalid PCM range");
+        int audible = 0;
+        for (int i = offsetSamples; i + 1 < offsetSamples + countSamples; i += 2) {
+            if (Math.abs((int)pcm[i]) > 16 || Math.abs((int)pcm[i + 1]) > 16) audible++;
+        }
+        return audible;
+    }
+
     static long queueDepth(long written, long played) {
         // AudioTrack's head uses a wrapping unsigned 32-bit frame count.
         // We only retain a bounded total; after a full wrap the caller
