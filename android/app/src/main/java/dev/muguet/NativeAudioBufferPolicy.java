@@ -59,6 +59,14 @@ final class NativeAudioBufferPolicy {
     // to 4096 frames on an 8811-frame device can leave the playback head at 0
     // forever. Until we see real head movement, allow one bounded device-sized
     // prefill; after that, return to the low-latency 4096-frame target.
+    // Android 12+ AudioTrack defaults to a streaming start threshold of
+    // buffer *capacity*. With a capacity of 8811 and a capped software
+    // queue of 4096–8192, PLAYING never advances the hardware playhead.
+    // Explicitly request two 48-kHz stereo blocks (~43 ms) to start.
+    static int requestedStartThreshold(int deviceCapacityFrames) {
+        return Math.max(1, Math.min(2048, deviceCapacityFrames));
+    }
+
     static int outputQueueTarget(int deviceCapacityFrames, boolean playbackAdvanced) {
         if (deviceCapacityFrames <= 0) return TARGET_QUEUED_FRAMES;
         int wanted = playbackAdvanced ? TARGET_QUEUED_FRAMES : 8192;
