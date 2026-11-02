@@ -8,18 +8,23 @@ def source(p):
     return (ROOT / p).read_text()
 
 class NativeRightStickPolicyTest(unittest.TestCase):
-    def test_touch_anchors_are_sampled_as_stick_until_release(self):
+    def test_touchpad_is_default_and_stick_mode_remains_available(self):
         touch = source("android/app/src/main/java/dev/muguet/TouchControls.java")
         engine = source("android/app/src/main/java/dev/muguet/EngineActivity.java")
-        self.assertIn("camera.x - camera.startX", touch)
-        self.assertIn("camera.y - camera.startY", touch)
-        self.assertIn("TouchLookPolicy.deflection(dx, dy, lookSensitivity)", touch)
+        policy = source("android/app/src/main/java/dev/muguet/TouchLookPolicy.java")
+        launcher = source("android/app/src/main/java/dev/muguet/LauncherActivity.java")
+        self.assertIn("TouchControls.nativeTouchpad(this, touchGain,", engine)
+        self.assertIn('settings.optBoolean("nightlane_touchpad_camera", true)', engine)
+        self.assertIn("new TouchControls(this, touchGain, true)", engine)
+        self.assertIn("nativeTouchLook(dx, dy)", engine)
+        self.assertIn("nativeTouchpad", touch)
+        self.assertIn("TouchLookPolicy.relativePixels(dx, lookSensitivity)", touch)
+        self.assertIn("TouchLookPolicy.relativePixels(dy, lookSensitivity)", touch)
         self.assertIn("input.rightStickX = dx / length * amount;", touch)
         self.assertIn("input.rightStickY = dy / length * amount;", touch)
-        self.assertIn("new TouchControls(this, touchGain, true)", engine)
-        self.assertIn("touch.rightStickX, touch.rightStickY, true", engine)
-        self.assertNotIn("accLookX", engine)
-        self.assertNotIn("lastTouchLookX", engine)
+        self.assertIn("float pixels = deltaDp * gain * 2.5f;", policy)
+        self.assertIn('settings.put("nightlane_touchpad_camera", touchpadCamera.isChecked())', launcher)
+        self.assertIn("pendingTouchpadX = pendingTouchpadY = 0f", touch)
         self.assertIn("grips.remove(event.getPointerId(index))", touch)
         self.assertIn("else if (action == MotionEvent.ACTION_CANCEL) release();", touch)
 
@@ -29,6 +34,8 @@ class NativeRightStickPolicyTest(unittest.TestCase):
         self.assertIn("pad.rightX = fmaxf(-1.0f, fminf(1.0f, lookDX * scale));", bridge)
         self.assertIn("pad.rightY = fmaxf(-1.0f, fminf(1.0f, -lookDY * scale));", bridge)
         self.assertIn("PGUpdateVirtualPad(pad);", bridge)
+        self.assertIn("PGInjectTouchMouseDelta(", bridge)
+        self.assertIn('{"nativeTouchLook",         "(FF)V"', bridge)
 
     def test_old_game_activity_retains_relative_touch_look(self):
         touch = source("android/app/src/main/java/dev/muguet/TouchControls.java")
