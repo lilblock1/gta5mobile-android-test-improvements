@@ -55,6 +55,7 @@ public final class EngineActivity extends Activity {
                                                float lookDX, float lookDY, boolean analog);
     private static native void nativeUpdatePadAnalog(float lx, float ly, float rx, float ry,
                                                      float lt, float rt, int buttons);
+    private static native void nativeTouchLook(float deltaX, float deltaY);
     private static native void nativeSetTargetingMode(int mode);
     private static native int nativeAudio(short[] out, int maxFrames);
     private static native long nativeAudioBufferState();
@@ -83,7 +84,7 @@ public final class EngineActivity extends Activity {
     private long lastAudioWatchdogAtMs, lastAudioWatchdogProduced, lastAudioWatchdogCallbacks;
     private long lastAudioWatchdogPlayback;
     private volatile boolean running, muted, surfaceReady, engineCoreLoaded;
-    private boolean focused, controller, inCar;
+    private boolean focused, controller, inCar, touchpadCamera;
     private int frameLimit = 30;
     // Render the Vulkan surface at a reduced internal resolution and let
     // SurfaceView scale it to the display. Touch HUD stays at device resolution.
@@ -160,10 +161,26 @@ public final class EngineActivity extends Activity {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         float touchGain = LookSensitivity.fromConfig(new File(getFilesDir(), "config.json"));
-        Log.i("NightlaneInput", "Native touch look sensitivity: " + touchGain + "x");
-        // A camera finger is sampled as a held virtual right stick rather
-        // than a one-tick swipe impulse the engine may never observe.
-        controls = new TouchControls(this, touchGain, true);
+        boolean useTouchpad = true;
+        try {
+            JSONObject settings = new JSONObject(new String(
+                java.nio.file.Files.readAllBytes(new File(getFilesDir(), "config.json").toPath()),
+                java.nio.charset.StandardCharsets.UTF_8));
+            useTouchpad = settings.optBoolean("nightlane_touchpad_camera", true);
+        } catch (Exception ignored) {}
+        touchpadCamera = useTouchpad;
+        Log.i("NightlaneInput", "Native camera input mode="
+            + (touchpadCamera ? "relative-touchpad" : "virtual-right-stick")
+            + " sensitivity=" + touchGain + "x");
+        if (touchpadCamera) {
+            controls = TouchControls.nativeTouchpad(this, touchGain, (dx, dy) -> {
+                // Deliver motion event deltas as they happen, independent of
+                // the 30-fps native engine and 60-Hz Java control poll.
+                if (engineCoreLoaded && running) nativeTouchLook(dx, dy);
+            });
+        } else {
+            controls = new TouchControls(this, touchGain, true);
+        }
         controls.setVisibility(View.VISIBLE);
         root.addView(controls, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -867,10 +884,12 @@ public final class EngineActivity extends Activity {
             if (down(KeyEvent.KEYCODE_BUTTON_R1)) keys.add("KeyQ");
             if (down(KeyEvent.KEYCODE_BUTTON_START)) keys.add("Escape");
             if (down(KeyEvent.KEYCODE_BUTTON_SELECT)) keys.add("KeyV");
-            // Sample the virtual right stick every UI tick even when the
-            // finger is stationary. Lift immediately centers the stick.
+            // Touchpad mode only sends button/movement state here. Its camera
+            // delta already went to the native mouse accumulator from the
+            // MotionEvent listener. Stick mode remains a user rollback.
             nativeUpdatePad(keys.toArray(new String[0]), touchButtons, horn,
-                            touch.rightStickX, touch.rightStickY, true);
+                            touchpadCamera ? 0f : touch.rightStickX,
+                            touchpadCamera ? 0f : touch.rightStickY, true);
 
             updateFps();
             handler.postDelayed(this, 16);
