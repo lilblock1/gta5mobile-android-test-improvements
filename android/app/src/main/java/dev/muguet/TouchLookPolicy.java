@@ -14,6 +14,21 @@ final class TouchLookPolicy {
 
     private TouchLookPolicy() {}
 
+    /**
+     * Native touchpad drag in guest mouse pixels. No joystick centre or
+     * acceleration: if the finger moves zero pixels, the camera moves zero.
+     * Using dp deltas keeps motion consistent across Android screen densities.
+     * Bound each MotionEvent update to avoid wild camera snaps on bad input.
+     */
+    static float relativePixels(float deltaDp, float sensitivity) {
+        if (!Float.isFinite(deltaDp)) return 0f;
+        float gain = Float.isFinite(sensitivity)
+            ? Math.max(LookSensitivity.MIN, Math.min(LookSensitivity.MAX, sensitivity))
+            : LookSensitivity.DEFAULT;
+        float pixels = deltaDp * gain * 2.5f;
+        return Math.max(-720f, Math.min(720f, pixels));
+    }
+
     static float deflection(float dx, float dy, float sensitivity) {
         if (!Float.isFinite(dx) || !Float.isFinite(dy)) return 0f;
         float distance = (float) Math.hypot(dx, dy);
