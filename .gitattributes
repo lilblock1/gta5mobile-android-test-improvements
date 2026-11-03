@@ -3,3 +3,5 @@
 *.rs text eol=lf
 *.yml text eol=lf
 *.gradle text eol=lf
+*.py text eol=lf
+engine-resources/*.part-* -text

@@ -1,8 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- INTERNET is kept for the multiplayer UDP socket in src/mp.rs, not for
-         fetching game files. Game data arrives only by the user importing their
-         own ZIP; nothing in the app contacts a game-file server. -->
+    <!-- Multiplayer and the explicitly requested first-Play HTTPS installer. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- All-files access, so a game folder the user points at in /sdcard can be
          read in place. Android grants a picked SAF tree to an app but still
@@ -15,7 +13,8 @@
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
     <application android:label="Nightlane Android" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round" android:theme="@android:style/Theme.Material.NoActionBar"
         android:allowBackup="false" android:largeHeap="true" android:hasCode="true">
-        <activity android:name="dev.muguet.LauncherActivity" android:exported="true">
+        <activity android:name="dev.muguet.LauncherActivity" android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

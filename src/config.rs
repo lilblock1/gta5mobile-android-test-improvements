@@ -237,6 +237,15 @@ fn settings(cfg_path: &Path) -> Vec<String> {
         eprintln!("{}", worldstream.log_line());
     }
     if let Some(v) = num("scale") { set_default("MUGUET_SCALE", v.to_string()); }
+    let (frame_queue, read_ahead, shadow_fix) = native_tuning(&cfg, cfg!(target_os = "android"));
+    set_default("NIGHTLANE_FRAME_QUEUE", frame_queue);
+    set_default("NIGHTLANE_READ_AHEAD", if read_ahead { "1" } else { "0" });
+    set_default("NIGHTLANE_SHADOW_FIX", if shadow_fix { "1" } else { "0" });
+    eprintln!("[device-limits] effective_heap_gb={} frame_queue={} read_ahead={} shadow_fix={}",
+        std::env::var("MUGUET_ANDROID_HEAP_GB").unwrap_or_else(|_| "n/a".into()),
+        std::env::var("NIGHTLANE_FRAME_QUEUE").unwrap_or_default(),
+        std::env::var("NIGHTLANE_READ_AHEAD").unwrap_or_default(),
+        std::env::var("NIGHTLANE_SHADOW_FIX").unwrap_or_default());
     if let Some(v) = num("mouse_sensitivity") { set_default("MUGUET_MOUSE_SENS", v.to_string()); }
     if let Some(v) = num("touch_sensitivity") { set_default("MUGUET_TOUCH_SENS", v.to_string()); }
     if let Some(r) = cfg.get("resolution").and_then(|v| v.as_str()) { set_default("MUGUET_RES", r); }
@@ -384,6 +393,24 @@ fn settings(cfg_path: &Path) -> Vec<String> {
     engine_args
 }
 
+// New Android installs and existing settings without these keys use the
+// implemented optimizations. Explicit user choices and invalid queue names
+// retain a way back to the original renderer behavior.
+fn native_tuning(cfg: &serde_json::Value, android: bool) -> (&'static str, bool, bool) {
+    let queue = match cfg.get("nightlane_frame_queue") {
+        None if android => "low_latency",
+        Some(v) if v.as_str() == Some("low_latency") => "low_latency",
+        Some(v) if v.as_str() == Some("minimal") => "minimal",
+        _ => "original",
+    };
+    let read_ahead = match cfg.get("nightlane_read_ahead") {
+        None => android,
+        Some(v) => v.as_bool().unwrap_or(false),
+    };
+    let shadow_fix = cfg.get("nightlane_shadow_fix").and_then(|v| v.as_bool()).unwrap_or(true);
+    (queue, read_ahead, shadow_fix)
+}
+
 // Native GTA frameLimit is a vsync divisor, not a numeric FPS target.
 fn engine_frame_mode(requested_fps: u32) -> u32 {
     if requested_fps == 0 { 0 } else if requested_fps <= 30 { 2 } else { 1 }
@@ -494,6 +521,19 @@ mod tests {
   <PedLodBias value="0.200000" />
   <VehicleLodBias value="0.150000" />
 </Config>"#;
+
+    #[test]
+    fn native_optimizations_default_on_android_and_preserve_explicit_opt_outs() {
+        use serde_json::json;
+        assert_eq!(native_tuning(&json!({}), true), ("low_latency", true, true));
+        assert_eq!(native_tuning(&json!({}), false), ("original", false, true));
+        assert_eq!(native_tuning(&json!({"nightlane_frame_queue":"original", "nightlane_read_ahead":false,
+            "nightlane_shadow_fix":false}), true), ("original", false, false));
+        assert_eq!(native_tuning(&json!({"nightlane_frame_queue":"minimal", "nightlane_read_ahead":true}), true),
+            ("minimal", true, true));
+        assert_eq!(native_tuning(&json!({"nightlane_frame_queue":"invalid", "nightlane_read_ahead":"true"}), true),
+            ("original", false, true));
+    }
 
     fn tag(xml: &str, name: &str) -> String {
         let re = regex::Regex::new(&format!(r#"<{name} value="[^"]*"\s*/>"#)).unwrap();

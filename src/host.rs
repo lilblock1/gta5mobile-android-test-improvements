@@ -37,7 +37,25 @@ struct WarningCount { last_print: Instant, suppressed: u64 }
 static WARNINGS: LazyLock<Mutex<HashMap<String, WarningCount>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 const MAX_TRACKED_WARNINGS: usize = 4096;
 
+// Movie/cutscene breadcrumbs: bounded and diagnostic-only. No playback behavior changes.
+static MOVIE_EVENTS: LazyLock<Mutex<std::collections::VecDeque<String>>> =
+    LazyLock::new(|| Mutex::new(std::collections::VecDeque::with_capacity(24)));
+pub(crate) fn movie_diagnostics_snapshot() -> String {
+    let events = MOVIE_EVENTS.lock().unwrap();
+    if events.is_empty() { return "no_movie_events_observed".into(); }
+    events.iter().cloned().collect::<Vec<_>>().join(" | ")
+}
+fn record_movie_event(source: &str, line: &str) {
+    let lower = line.to_ascii_lowercase();
+    if !["bink", "movie", "cutscene", "video playback"].iter().any(|term| lower.contains(term)) { return; }
+    let safe: String = line.chars().take(240).collect();
+    let event = format!("{source}: {safe}");
+    let mut events = MOVIE_EVENTS.lock().unwrap();
+    if events.len() == 24 { events.pop_front(); }
+    events.push_back(event);
+}
 fn log_engine_line(source: &str, line: &str) {
+    record_movie_event(source, line);
     let skipped = if line.starts_with("Warning:") {
         let now = Instant::now();
         let mut warnings = WARNINGS.lock().unwrap();

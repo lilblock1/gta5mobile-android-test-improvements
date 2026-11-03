@@ -34,6 +34,7 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
     private TouchControls controls;
     private TextView status, fpsText;
     private ThermalStatus thermalStatus;
+    private Phase0Telemetry phase0Telemetry;
     private InputManagerCompat devices;
     private boolean active, focused, controller, inCar;
     private float lx, ly, rx, ry, lt, rt, hx, hy;
@@ -47,6 +48,7 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
     private void sampleProcessRam() {
         long now = android.os.SystemClock.elapsedRealtime();
         if (now - lastRamSampleAt < 10000) return;
+        sampleMemoryPressure();
         lastRamSampleAt = now;
         android.os.Debug.MemoryInfo info = new android.os.Debug.MemoryInfo();
         android.os.Debug.getMemoryInfo(info);
@@ -54,6 +56,29 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
             + info.getTotalPrivateDirty() + " KiB sharedDirty="
             + info.getTotalSharedDirty() + " KiB nativeHeapAllocated="
             + (android.os.Debug.getNativeHeapAllocatedSize() >> 10) + " KiB");
+    }
+    // Early warning only: the native renderer decides whether GPU resources are safe to evict.
+    // Hysteresis and a cooldown avoid repeatedly requesting cleanup during normal gameplay.
+    private long lastProactivePressureAt;
+    private boolean proactivePressureArmed = true;
+    private void sampleMemoryPressure() {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (now - lastRamSampleAt < 10000) return;
+        android.app.ActivityManager manager =
+            (android.app.ActivityManager) getSystemService(ACTIVITY_SERVICE);
+        if (manager == null) return;
+        android.app.ActivityManager.MemoryInfo system = new android.app.ActivityManager.MemoryInfo();
+        manager.getMemoryInfo(system);
+        long availableMb = system.availMem / (1024L * 1024L);
+        if (availableMb > 1800) proactivePressureArmed = true;
+        if (proactivePressureArmed && availableMb < 1100
+                && now - lastProactivePressureAt > 30000) {
+            proactivePressureArmed = false;
+            lastProactivePressureAt = now;
+            nativeMemoryPressure(android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW);
+            hudLog("early memory pressure: available=" + availableMb
+                + "MB; requested native cache trim (GPU release not confirmed)");
+        }
     }
     private long lastMemoryWarningAt;
     @Override public void onTrimMemory(int level) {
@@ -78,12 +103,14 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
     }
 
     @Override public void onCreate(Bundle state) {
+        configureDeviceLimits();
         // Initialize the Vulkan proxy in this process before native rendering.
         if (!DriverBridge.prepare(this)) {
             android.util.Log.e("MuguetDriver", DriverBridge.status());
         }
         super.onCreate(state);
         thermalStatus = new ThermalStatus(this);
+        phase0Telemetry = new Phase0Telemetry(this);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
@@ -112,6 +139,35 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
             + "/" + android.os.Build.MODEL + " android_api="
             + android.os.Build.VERSION.SDK_INT + " android_release="
             + android.os.Build.VERSION.RELEASE + " game_path=wasmtime");
+    }
+
+    // Set before NativeActivity starts the renderer and caches its MSAA probe.
+    private void configureDeviceLimits() {
+        try {
+            File file = new File(getFilesDir(), "config.json");
+            org.json.JSONObject config = file.isFile()
+                ? new org.json.JSONObject(new String(java.nio.file.Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8))
+                : new org.json.JSONObject();
+            android.app.ActivityManager manager = getSystemService(android.app.ActivityManager.class);
+            android.app.ActivityManager.MemoryInfo info = new android.app.ActivityManager.MemoryInfo();
+            if (manager != null) manager.getMemoryInfo(info);
+            int requestedHeap = config.optInt("android_heap_gb", 5);
+            int heapLimit = HeapPolicy.limit(requestedHeap, info.totalMem, config.optBoolean("android_auto_heap", true));
+            if (android.system.Os.getenv("MUGUET_ANDROID_HEAP_GB") == null)
+                android.system.Os.setenv("MUGUET_ANDROID_HEAP_GB", Integer.toString(heapLimit), true);
+            Log.i("Muguet", "Heap requested_gb=" + requestedHeap + " effective_gb="
+                + android.system.Os.getenv("MUGUET_ANDROID_HEAP_GB") + " total_ram_bytes=" + info.totalMem);
+            String mode = config.optString("android_msaa_mode", "default");
+            int limit = MsaaPolicy.limit(mode, config.optDouble("scale", 0.5), info.totalMem);
+            // Retain an explicit native override for developer diagnostics.
+            if (android.system.Os.getenv("MUGUET_MSAA_MAX") == null)
+                android.system.Os.setenv("MUGUET_MSAA_MAX", Integer.toString(limit), true);
+            Log.i("Muguet", "MSAA mode=" + mode + " requested_cap=" + limit
+                + " effective_cap=" + android.system.Os.getenv("MUGUET_MSAA_MAX")
+                + " total_ram_bytes=" + info.totalMem);
+        } catch (Exception e) {
+            Log.w("Muguet", "Device limits unavailable; keeping native defaults", e);
+        }
     }
 
     private FrameLayout overlay;
@@ -373,5 +429,6 @@ public final class GameActivity extends NativeActivity implements InputManagerCo
         skippedAt = stats[5];
         if (fpsText != null) fpsText.setText(PerformanceHud.format(fps, stats, skipped, seconds, ThermalStatus.label(thermalLevel)));
         sampleProcessRam();
+        if (phase0Telemetry != null) phase0Telemetry.sample();
     }
 }
